@@ -3,6 +3,11 @@ import { HttpClient, HttpParams } from '@angular/common/http';
 import { Observable } from 'rxjs';
 import { environment } from '../environments/environment';
 
+export interface Rsvp {
+  email: string;
+  status: 'accepted' | 'declined' | 'tentative' | 'needsAction';
+}
+
 export interface Meeting {
   id: number;
   title: string;
@@ -12,6 +17,8 @@ export interface Meeting {
   notes: string | null;
   summary: string | null;
   status: 'upcoming' | 'completed' | 'cancelled';
+  google_event_id?: string | null;
+  rsvp?: Rsvp[] | null;
   created_at: string;
 }
 

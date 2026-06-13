@@ -181,12 +181,13 @@ app.post("/api/meetings", requireAuth, async (req: AuthedRequest, res) => {
 });
 
 app.patch("/api/meetings/:id", requireAuth, async (req: AuthedRequest, res) => {
-  const allowed = ["title", "meeting_date", "attendees", "meet_link", "notes", "summary", "status"];
+  const allowed = ["title", "meeting_date", "attendees", "meet_link", "notes", "summary", "status", "google_event_id", "rsvp"];
   const sets: string[] = [];
   const vals: any[] = [];
   for (const f of allowed) {
     if (f in req.body) {
-      vals.push(nullIfEmpty(req.body[f]));
+      // rsvp is JSONB — store it as JSON text.
+      vals.push(f === "rsvp" ? JSON.stringify(req.body[f]) : nullIfEmpty(req.body[f]));
       sets.push(`${f} = $${vals.length}`);
     }
   }
