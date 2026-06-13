@@ -55,9 +55,15 @@ export class GoogleCalendarService {
     }
     return new Promise<string>((resolve, reject) => {
       this.pending = { resolve, reject };
-      // Empty prompt tries silent; Google shows consent the first time automatically.
-      this.tokenClient.requestAccessToken({ prompt: '' });
+      // No prompt override: Google shows the consent popup the first time and
+      // returns the token silently afterwards. (Must be called from a click.)
+      this.tokenClient.requestAccessToken();
     });
+  }
+
+  /** Public: trigger consent / fetch a token now (call from a click handler). */
+  requestAccess(): Promise<string> {
+    return this.getToken();
   }
 
   static parseEmails(text: string | null | undefined): string[] {

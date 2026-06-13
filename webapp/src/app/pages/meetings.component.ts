@@ -207,9 +207,8 @@ export class MeetingsComponent implements OnInit {
   }
   close() { this.modalOpen.set(false); }
 
-  save() {
+  async save() {
     if (!this.form.title.trim()) { this.formError.set('Title is required.'); return; }
-    this.saving.set(true);
     const startISO = this.form.meeting_date ? new Date(this.form.meeting_date).toISOString() : '';
     const body: Partial<Meeting> = {
       title: this.form.title.trim(),
@@ -221,7 +220,9 @@ export class MeetingsComponent implements OnInit {
     };
     const id = this.editingId();
 
+    // Edit path — no calendar sync.
     if (id) {
+      this.saving.set(true);
       this.api.updateMeeting(id, body).subscribe({
         next: () => { this.saving.set(false); this.modalOpen.set(false); this.load(); },
         error: () => { this.saving.set(false); this.formError.set('Could not save. Try again.'); },
@@ -229,43 +230,58 @@ export class MeetingsComponent implements OnInit {
       return;
     }
 
-    // Create flow (optionally sync to Google Calendar).
-    this.api.createMeeting(body).subscribe({
-      next: (created) => {
-        const wantSync = this.syncCal && !!startISO;
-        this.saving.set(false);
-        this.modalOpen.set(false);
-        if (!wantSync) { this.load(); return; }
-        this.load();
-        this.syncToCalendar(created, startISO);
-      },
-      error: () => { this.saving.set(false); this.formError.set('Could not create meeting.'); },
+    const wantSync = this.syncCal && !!startISO;
+    if (this.syncCal && !startISO) {
+      this.formError.set('Pick a date & time to add this to Google Calendar — or uncheck that option to just save it here.');
+      return;
+    }
+
+    this.saving.set(true);
+    this.formError.set(null);
+
+    // Create the Google Calendar event FIRST, straight from this click, so the
+    // permission popup isn't blocked. Only then save to our database.
+    let ev = null as Awaited<ReturnType<GoogleCalendarService['createEvent']>> | null;
+    if (wantSync) {
+      try {
+        const attendees = GoogleCalendarService.parseEmails(this.form.attendees);
+        ev = await this.cal.createEvent({
+          title: body.title!, description: body.notes ?? '', startISO, attendees,
+        });
+      } catch (e: any) {
+        this.zone.run(() => { this.saving.set(false); this.formError.set(this.calErr(e)); });
+        return;
+      }
+    }
+
+    const eventRef = ev;
+    this.zone.run(() => {
+      this.api.createMeeting(body).subscribe({
+        next: (created) => {
+          if (!eventRef) {
+            this.saving.set(false); this.modalOpen.set(false); this.load(); return;
+          }
+          this.api.updateMeeting(created.id, {
+            google_event_id: eventRef.eventId,
+            meet_link: eventRef.meetLink ?? undefined,
+            rsvp: eventRef.rsvp,
+          }).subscribe({
+            next: () => { this.saving.set(false); this.modalOpen.set(false); this.load(); },
+            error: () => { this.saving.set(false); this.modalOpen.set(false); this.load(); },
+          });
+        },
+        error: () => { this.saving.set(false); this.formError.set('Could not save the meeting.'); },
+      });
     });
   }
 
-  private async syncToCalendar(m: Meeting, startISO: string) {
-    this.setMsg(m.id, '📆 Creating Google Calendar event & sending invites…');
-    try {
-      const attendees = GoogleCalendarService.parseEmails(m.attendees);
-      const ev = await this.cal.createEvent({
-        title: m.title, description: m.notes, startISO, attendees,
-      });
-      this.api
-        .updateMeeting(m.id, { google_event_id: ev.eventId, meet_link: ev.meetLink ?? undefined, rsvp: ev.rsvp })
-        .subscribe({
-          next: () => { this.setMsg(m.id, ''); this.load(); },
-          error: () => this.setMsg(m.id, 'Saved meeting, but failed to store calendar details.'),
-        });
-    } catch (e: any) {
-      this.setMsg(
-        m.id,
-        '⚠️ Meeting saved, but Google Calendar sync failed (' +
-          (e?.message?.includes('403') || e?.error === 'access_denied'
-            ? 'calendar permission denied or Calendar API not enabled'
-            : 'please try the ↻ RSVPs button or check Calendar setup') +
-          ').'
-      );
-    }
+  private calErr(e: any): string {
+    const s = JSON.stringify(e?.message ?? e?.error ?? e ?? '').toLowerCase();
+    if (s.includes('403') || s.includes('permission') || s.includes('insufficient') || s.includes('disabled'))
+      return 'Calendar sync failed — the Google Calendar API may not be enabled, or the scope isn’t added yet. Complete the 2 Google Cloud steps, then retry. (Uncheck the calendar option to save without syncing.)';
+    if (s.includes('access_denied') || s.includes('closed') || s.includes('popup') || s.includes('denied'))
+      return 'Calendar permission wasn’t granted (the window was closed or blocked). Click Create meeting again and choose Allow.';
+    return 'Couldn’t reach Google Calendar. Retry, or uncheck the calendar option to save without syncing.';
   }
 
   async syncRsvp(m: Meeting) {
