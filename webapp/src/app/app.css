@@ -1,12 +1,62 @@
-.container {
-  max-width: 720px;
-  margin: 2rem auto;
-  padding: 0 1rem;
+:host {
   font-family: system-ui, -apple-system, sans-serif;
   color: #1a1a1a;
 }
 
-h1 { margin-bottom: 0; }
+/* ---------- Login page ---------- */
+.login-wrap {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, #eef2ff 0%, #f8fafc 100%);
+  padding: 1rem;
+}
+.login-card {
+  background: white;
+  border: 1px solid #e2e2e2;
+  border-radius: 16px;
+  padding: 2.5rem 2rem;
+  width: 100%;
+  max-width: 380px;
+  text-align: center;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.06);
+}
+.login-card h1 { margin: 0; }
+.signin-prompt { margin-top: 1.5rem; font-weight: 600; }
+.google-button {
+  display: flex;
+  justify-content: center;
+  margin-top: 0.75rem;
+}
+
+/* ---------- Top bar (logged in) ---------- */
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.75rem 1.25rem;
+  border-bottom: 1px solid #e2e2e2;
+  background: #fafafa;
+}
+.brand { font-weight: 700; }
+.user { display: flex; align-items: center; gap: 0.6rem; font-size: 0.9rem; }
+.avatar { width: 28px; height: 28px; border-radius: 50%; }
+
+/* ---------- App content ---------- */
+.container {
+  max-width: 720px;
+  margin: 1.5rem auto;
+  padding: 0 1rem;
+}
+.welcome {
+  background: #ecfdf5;
+  border: 1px solid #a7f3d0;
+  border-radius: 12px;
+  padding: 1rem 1.25rem;
+  margin-bottom: 1.25rem;
+}
+.welcome h1 { margin: 0 0 0.25rem; font-size: 1.4rem; }
 .subtitle { color: #666; margin-top: 0.25rem; }
 
 .card {
@@ -46,7 +96,7 @@ button {
   cursor: pointer;
 }
 button:hover { background: #1d4ed8; }
-button.ghost { background: transparent; color: #2563eb; padding: 0.25rem 0.5rem; }
+button.ghost { background: transparent; color: #2563eb; padding: 0.25rem 0.6rem; }
 
 .row { display: flex; align-items: center; justify-content: space-between; }
 .muted { color: #888; }

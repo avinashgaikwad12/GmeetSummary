@@ -1,42 +1,78 @@
-<main class="container">
-  <h1>GmeetSummary</h1>
-  <p class="subtitle">Summarize your Google Meet sessions.</p>
+@if (!user()) {
+  <!-- ============ LOGIN PAGE ============ -->
+  <main class="login-wrap">
+    <div class="login-card">
+      <h1>GmeetSummary</h1>
+      <p class="subtitle">Summarize your Google Meet sessions.</p>
+      <p class="signin-prompt">Sign in to continue</p>
 
-  <section class="card">
-    <h2>New summary</h2>
-    <label>
-      Title
-      <input type="text" [(ngModel)]="title" placeholder="Weekly standup" />
-    </label>
-    <label>
-      Transcript
-      <textarea [(ngModel)]="transcript" rows="5" placeholder="Paste the meeting transcript..."></textarea>
-    </label>
-    <button (click)="add()">Save & summarize</button>
-  </section>
+      <!-- Google renders its official button into this element -->
+      <div id="google-button" class="google-button"></div>
 
-  @if (error()) {
-    <p class="error">{{ error() }}</p>
-  }
-
-  <section>
-    <div class="row">
-      <h2>Summaries</h2>
-      <button class="ghost" (click)="refresh()">Refresh</button>
-    </div>
-
-    @if (loading()) {
-      <p>Loading…</p>
-    } @else if (summaries().length === 0) {
-      <p class="muted">No summaries yet. Add one above.</p>
-    } @else {
-      @for (s of summaries(); track s.id) {
-        <article class="card">
-          <h3>{{ s.title }}</h3>
-          <p>{{ s.summary }}</p>
-          <small class="muted">{{ s.created_at }}</small>
-        </article>
+      @if (signingIn()) {
+        <p class="muted">Signing you in…</p>
       }
+      @if (authError()) {
+        <p class="error">{{ authError() }}</p>
+      }
+    </div>
+  </main>
+} @else {
+  <!-- ============ LOGGED-IN APP ============ -->
+  <header class="topbar">
+    <span class="brand">GmeetSummary</span>
+    <span class="user">
+      @if (user()?.picture) {
+        <img class="avatar" [src]="user()!.picture" alt="" referrerpolicy="no-referrer" />
+      }
+      {{ user()?.name || user()?.email }}
+      <button class="ghost" (click)="logout()">Log out</button>
+    </span>
+  </header>
+
+  <main class="container">
+    <!-- Welcome message shown right after a successful login -->
+    <section class="welcome">
+      <h1>Welcome, {{ user()?.name || user()?.email }}! 🎉</h1>
+      <p class="muted">You're signed in as {{ user()?.email }}. Your login was recorded.</p>
+    </section>
+
+    <section class="card">
+      <h2>New summary</h2>
+      <label>
+        Title
+        <input type="text" [(ngModel)]="title" placeholder="Weekly standup" />
+      </label>
+      <label>
+        Transcript
+        <textarea [(ngModel)]="transcript" rows="5" placeholder="Paste the meeting transcript..."></textarea>
+      </label>
+      <button (click)="add()">Save & summarize</button>
+    </section>
+
+    @if (error()) {
+      <p class="error">{{ error() }}</p>
     }
-  </section>
-</main>
+
+    <section>
+      <div class="row">
+        <h2>Summaries</h2>
+        <button class="ghost" (click)="refresh()">Refresh</button>
+      </div>
+
+      @if (loading()) {
+        <p>Loading…</p>
+      } @else if (summaries().length === 0) {
+        <p class="muted">No summaries yet. Add one above.</p>
+      } @else {
+        @for (s of summaries(); track s.id) {
+          <article class="card">
+            <h3>{{ s.title }}</h3>
+            <p>{{ s.summary }}</p>
+            <small class="muted">{{ s.created_at }}</small>
+          </article>
+        }
+      }
+    </section>
+  </main>
+}
