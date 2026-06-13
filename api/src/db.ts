@@ -15,3 +15,9 @@ export const pool = new Pool({
   // Neon requires SSL. This setting works for Neon's managed certs.
   ssl: { rejectUnauthorized: false },
 });
+
+// Neon closes idle connections; without this listener, that error would be
+// thrown as an uncaught exception and crash the whole process.
+pool.on("error", (err) => {
+  console.error("Unexpected Postgres pool error:", err.message);
+});

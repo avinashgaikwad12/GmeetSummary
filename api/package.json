@@ -9,7 +9,7 @@
     "start": "node dist/index.js"
   },
   "engines": {
-    "node": ">=20"
+    "node": "22.x"
   },
   "dependencies": {
     "cors": "^2.8.5",

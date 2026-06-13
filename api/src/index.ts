@@ -57,6 +57,8 @@ app.post("/api/summaries", async (req, res) => {
 
 // Render provides the PORT env var; default to 3000 for local dev.
 const port = Number(process.env.PORT) || 3000;
-app.listen(port, () => {
-  console.log(`API listening on port ${port}`);
+// Bind to 0.0.0.0 so Render's router/health checks can always reach us
+// (the default bind can resolve to IPv6-only and flap out of rotation).
+app.listen(port, "0.0.0.0", () => {
+  console.log(`API listening on 0.0.0.0:${port}`);
 });
