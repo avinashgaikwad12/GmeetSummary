@@ -20,6 +20,9 @@ import { AuthService } from './auth.service';
           <a routerLink="/meetings" routerLinkActive="active" (click)="closeNav()">
             <span class="ic">📅</span> Meetings
           </a>
+          <a routerLink="/calendar" routerLinkActive="active" (click)="closeNav()">
+            <span class="ic">📆</span> Calendar
+          </a>
           <a routerLink="/tasks" routerLinkActive="active" (click)="closeNav()">
             <span class="ic">✅</span> Action Items
           </a>
