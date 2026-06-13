@@ -1,0 +1,42 @@
+<main class="container">
+  <h1>GmeetSummary</h1>
+  <p class="subtitle">Summarize your Google Meet sessions.</p>
+
+  <section class="card">
+    <h2>New summary</h2>
+    <label>
+      Title
+      <input type="text" [(ngModel)]="title" placeholder="Weekly standup" />
+    </label>
+    <label>
+      Transcript
+      <textarea [(ngModel)]="transcript" rows="5" placeholder="Paste the meeting transcript..."></textarea>
+    </label>
+    <button (click)="add()">Save & summarize</button>
+  </section>
+
+  @if (error()) {
+    <p class="error">{{ error() }}</p>
+  }
+
+  <section>
+    <div class="row">
+      <h2>Summaries</h2>
+      <button class="ghost" (click)="refresh()">Refresh</button>
+    </div>
+
+    @if (loading()) {
+      <p>Loading…</p>
+    } @else if (summaries().length === 0) {
+      <p class="muted">No summaries yet. Add one above.</p>
+    } @else {
+      @for (s of summaries(); track s.id) {
+        <article class="card">
+          <h3>{{ s.title }}</h3>
+          <p>{{ s.summary }}</p>
+          <small class="muted">{{ s.created_at }}</small>
+        </article>
+      }
+    }
+  </section>
+</main>

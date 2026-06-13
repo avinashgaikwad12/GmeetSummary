@@ -1,0 +1,53 @@
+.container {
+  max-width: 720px;
+  margin: 2rem auto;
+  padding: 0 1rem;
+  font-family: system-ui, -apple-system, sans-serif;
+  color: #1a1a1a;
+}
+
+h1 { margin-bottom: 0; }
+.subtitle { color: #666; margin-top: 0.25rem; }
+
+.card {
+  border: 1px solid #e2e2e2;
+  border-radius: 10px;
+  padding: 1rem 1.25rem;
+  margin-bottom: 1rem;
+  background: #fafafa;
+}
+
+label {
+  display: block;
+  margin-bottom: 0.75rem;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+input, textarea {
+  display: block;
+  width: 100%;
+  margin-top: 0.25rem;
+  padding: 0.5rem;
+  border: 1px solid #ccc;
+  border-radius: 6px;
+  font: inherit;
+  box-sizing: border-box;
+  font-weight: 400;
+}
+
+button {
+  background: #2563eb;
+  color: white;
+  border: none;
+  border-radius: 6px;
+  padding: 0.55rem 1rem;
+  font: inherit;
+  cursor: pointer;
+}
+button:hover { background: #1d4ed8; }
+button.ghost { background: transparent; color: #2563eb; padding: 0.25rem 0.5rem; }
+
+.row { display: flex; align-items: center; justify-content: space-between; }
+.muted { color: #888; }
+.error { color: #b91c1c; font-weight: 600; }

@@ -1,0 +1,16 @@
+# Dependencies
+**/node_modules/
+
+# Build output
+api/dist/
+webapp/dist/
+webapp/.angular/
+
+# Env files (secrets) — never commit these
+.env
+**/.env
+
+# Logs / OS files
+*.log
+.DS_Store
+Thumbs.db

@@ -1,0 +1,17 @@
+# Optional: Render Blueprint. Lets Render configure the API service from this
+# file instead of clicking through the dashboard. Render -> New -> Blueprint.
+# You still set DATABASE_URL and CORS_ORIGIN as secrets in the dashboard.
+services:
+  - type: web
+    name: gmeetsummary-api
+    runtime: node
+    rootDir: api
+    plan: free
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: DATABASE_URL
+        sync: false   # set manually in dashboard (Neon connection string)
+      - key: CORS_ORIGIN
+        sync: false   # set manually in dashboard (your Vercel URL)
