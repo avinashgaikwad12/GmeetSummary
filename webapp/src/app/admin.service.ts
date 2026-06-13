@@ -1,8 +1,7 @@
 import { Injectable, inject } from '@angular/core';
-import { HttpClient, HttpHeaders } from '@angular/common/http';
+import { HttpClient } from '@angular/common/http';
 import { Observable } from 'rxjs';
 import { environment } from '../environments/environment';
-import { AuthService } from './auth.service';
 
 export interface AdminUser {
   id: number;
@@ -25,31 +24,15 @@ export interface LoginRecord {
 @Injectable({ providedIn: 'root' })
 export class AdminService {
   private http = inject(HttpClient);
-  private auth = inject(AuthService);
-  private baseUrl = environment.apiUrl;
-
-  // Attach the Google ID token so the API can verify the caller is an admin.
-  private authHeaders(): HttpHeaders {
-    return new HttpHeaders({ Authorization: `Bearer ${this.auth.token ?? ''}` });
-  }
+  private base = environment.apiUrl;
 
   listUsers(): Observable<AdminUser[]> {
-    return this.http.get<AdminUser[]>(`${this.baseUrl}/api/admin/users`, {
-      headers: this.authHeaders(),
-    });
+    return this.http.get<AdminUser[]>(`${this.base}/api/admin/users`);
   }
-
   listLogins(): Observable<LoginRecord[]> {
-    return this.http.get<LoginRecord[]>(`${this.baseUrl}/api/admin/logins`, {
-      headers: this.authHeaders(),
-    });
+    return this.http.get<LoginRecord[]>(`${this.base}/api/admin/logins`);
   }
-
-  setAccess(userId: number, enabled: boolean): Observable<AdminUser> {
-    return this.http.patch<AdminUser>(
-      `${this.baseUrl}/api/admin/users/${userId}/access`,
-      { enabled },
-      { headers: this.authHeaders() }
-    );
+  setAccess(id: number, enabled: boolean): Observable<AdminUser> {
+    return this.http.patch<AdminUser>(`${this.base}/api/admin/users/${id}/access`, { enabled });
   }
 }

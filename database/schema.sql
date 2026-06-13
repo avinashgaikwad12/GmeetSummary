@@ -42,3 +42,35 @@ CREATE TABLE IF NOT EXISTS logins (
 
 CREATE INDEX IF NOT EXISTS idx_logins_logged_in_at
     ON logins (logged_in_at DESC);
+
+-- ---------------------------------------------------------------------------
+-- Core app: meetings and their action items (tasks). Scoped per user_email.
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS meetings (
+    id            SERIAL PRIMARY KEY,
+    user_email    TEXT        NOT NULL,            -- owner
+    title         TEXT        NOT NULL,
+    meeting_date  TIMESTAMPTZ,
+    attendees     TEXT,                            -- freeform / comma separated
+    meet_link     TEXT,                            -- Google Meet URL
+    notes         TEXT,
+    summary       TEXT,
+    status        TEXT        NOT NULL DEFAULT 'upcoming', -- upcoming|completed|cancelled
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_meetings_user
+    ON meetings (user_email, meeting_date DESC);
+
+CREATE TABLE IF NOT EXISTS tasks (
+    id          SERIAL PRIMARY KEY,
+    user_email  TEXT        NOT NULL,              -- owner
+    meeting_id  INTEGER     REFERENCES meetings (id) ON DELETE SET NULL,
+    title       TEXT        NOT NULL,
+    done        BOOLEAN     NOT NULL DEFAULT false,
+    priority    TEXT        NOT NULL DEFAULT 'medium',  -- low|medium|high
+    due_date    DATE,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_tasks_user
+    ON tasks (user_email, done, due_date);

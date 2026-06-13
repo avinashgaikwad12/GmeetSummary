@@ -7,48 +7,54 @@ export interface User {
   email: string;
   name: string | null;
   picture: string | null;
-  isAdmin?: boolean;
+  isAdmin: boolean;
 }
 
-const USER_KEY = 'gmeet_user';
-const TOKEN_KEY = 'gmeet_token';
+const USER_KEY = 'mh_user';
+const TOKEN_KEY = 'mh_token';
+const THEME_KEY = 'mh_theme';
 
 @Injectable({ providedIn: 'root' })
 export class AuthService {
   private http = inject(HttpClient);
   private baseUrl = environment.apiUrl;
 
-  // Current signed-in user (null when logged out). Restored from localStorage
-  // so a page refresh keeps you logged in.
   readonly user = signal<User | null>(this.restore());
+  readonly theme = signal<'light' | 'dark'>(
+    (localStorage.getItem(THEME_KEY) as 'light' | 'dark') || 'light'
+  );
 
-  // The Google ID token, sent as a Bearer token on admin requests. It expires
-  // ~1h after login; admin calls then 401 and prompt a re-login.
-  private credential: string | null = localStorage.getItem(TOKEN_KEY);
-
+  private _token: string | null = localStorage.getItem(TOKEN_KEY);
   get token(): string | null {
-    return this.credential;
+    return this._token;
   }
 
-  /** Send the Google ID token to the API, which verifies it and logs the login. */
-  loginWithGoogle(credential: string): Observable<User> {
+  /** Exchange the Google ID token for our own session JWT. */
+  loginWithGoogle(credential: string): Observable<{ token: string; user: User }> {
     return this.http
-      .post<User>(`${this.baseUrl}/api/auth/google`, { credential })
+      .post<{ token: string; user: User }>(`${this.baseUrl}/api/auth/google`, { credential })
       .pipe(
-        tap((user) => {
+        tap(({ token, user }) => {
+          this._token = token;
           this.user.set(user);
-          this.credential = credential;
+          localStorage.setItem(TOKEN_KEY, token);
           localStorage.setItem(USER_KEY, JSON.stringify(user));
-          localStorage.setItem(TOKEN_KEY, credential);
         })
       );
   }
 
   logout(): void {
+    this._token = null;
     this.user.set(null);
-    this.credential = null;
-    localStorage.removeItem(USER_KEY);
     localStorage.removeItem(TOKEN_KEY);
+    localStorage.removeItem(USER_KEY);
+  }
+
+  toggleTheme(): void {
+    const next = this.theme() === 'light' ? 'dark' : 'light';
+    this.theme.set(next);
+    localStorage.setItem(THEME_KEY, next);
+    document.documentElement.setAttribute('data-theme', next);
   }
 
   private restore(): User | null {

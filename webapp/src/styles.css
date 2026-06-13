@@ -1,1 +1,135 @@
-/* You can add global styles to this file, and also import other style files */
+/* ============================================================
+   MeetHub design system
+   ============================================================ */
+:root {
+  --brand: #6d28d9;
+  --brand-2: #2563eb;
+  --brand-grad: linear-gradient(135deg, #7c3aed 0%, #2563eb 100%);
+
+  --bg: #f6f7fb;
+  --surface: #ffffff;
+  --surface-2: #f1f3f9;
+  --border: #e6e8f0;
+  --text: #14161d;
+  --text-dim: #6b7280;
+  --shadow: 0 1px 2px rgba(16, 24, 40, 0.04), 0 8px 24px rgba(16, 24, 40, 0.06);
+  --shadow-lg: 0 12px 40px rgba(16, 24, 40, 0.14);
+
+  --green: #16a34a;  --green-bg: #dcfce7;
+  --red: #dc2626;    --red-bg: #fee2e2;
+  --amber: #d97706;  --amber-bg: #fef3c7;
+  --blue: #2563eb;   --blue-bg: #dbeafe;
+  --radius: 14px;
+}
+
+[data-theme="dark"] {
+  --bg: #0c0e14;
+  --surface: #14171f;
+  --surface-2: #1b1f2a;
+  --border: #262b38;
+  --text: #e8eaf0;
+  --text-dim: #9aa3b2;
+  --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 8px 24px rgba(0,0,0,0.35);
+  --shadow-lg: 0 12px 40px rgba(0,0,0,0.5);
+  --green-bg: #0c2a1a; --red-bg: #34151a; --amber-bg: #2e2410; --blue-bg: #122039;
+}
+
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0;
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  -webkit-font-smoothing: antialiased;
+  transition: background .2s, color .2s;
+}
+h1, h2, h3, h4 { margin: 0; font-weight: 700; letter-spacing: -0.01em; }
+a { color: inherit; text-decoration: none; }
+
+/* ---------- Buttons ---------- */
+.btn {
+  display: inline-flex; align-items: center; gap: .5rem;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  border-radius: 10px;
+  padding: .55rem .9rem;
+  font: inherit; font-weight: 600; font-size: .9rem;
+  cursor: pointer; white-space: nowrap;
+  transition: transform .05s, background .15s, border-color .15s, box-shadow .15s;
+}
+.btn:hover { background: var(--surface-2); }
+.btn:active { transform: translateY(1px); }
+.btn-primary { background: var(--brand-grad); color: #fff; border: none; box-shadow: 0 4px 14px rgba(109,40,217,.35); }
+.btn-primary:hover { filter: brightness(1.05); background: var(--brand-grad); }
+.btn-ghost { background: transparent; border-color: transparent; color: var(--text-dim); }
+.btn-ghost:hover { background: var(--surface-2); color: var(--text); }
+.btn-danger { color: var(--red); border-color: transparent; background: transparent; }
+.btn-danger:hover { background: var(--red-bg); }
+.btn-sm { padding: .35rem .6rem; font-size: .8rem; border-radius: 8px; }
+.btn-icon { padding: .5rem; border-radius: 10px; }
+
+/* ---------- Inputs ---------- */
+.field { display: block; margin-bottom: .9rem; }
+.field > span { display:block; font-size:.8rem; font-weight:600; color: var(--text-dim); margin-bottom:.3rem; }
+input, textarea, select {
+  width: 100%; font: inherit;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: .6rem .7rem;
+  transition: border-color .15s, box-shadow .15s;
+}
+input:focus, textarea:focus, select:focus {
+  outline: none; border-color: var(--brand);
+  box-shadow: 0 0 0 3px rgba(109,40,217,.15);
+}
+textarea { resize: vertical; }
+
+/* ---------- Card ---------- */
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+.card-pad { padding: 1.1rem 1.25rem; }
+
+/* ---------- Badges ---------- */
+.badge {
+  display:inline-flex; align-items:center; gap:.35rem;
+  font-size:.72rem; font-weight:700; padding:.2rem .55rem; border-radius:999px;
+  text-transform: capitalize;
+}
+.badge.upcoming { background: var(--blue-bg); color: var(--blue); }
+.badge.completed { background: var(--green-bg); color: var(--green); }
+.badge.cancelled { background: var(--red-bg); color: var(--red); }
+.badge.high { background: var(--red-bg); color: var(--red); }
+.badge.medium { background: var(--amber-bg); color: var(--amber); }
+.badge.low { background: var(--surface-2); color: var(--text-dim); }
+
+/* ---------- Modal ---------- */
+.modal-backdrop {
+  position: fixed; inset: 0; background: rgba(8,10,16,.55);
+  display:flex; align-items:center; justify-content:center; padding:1rem; z-index: 50;
+  backdrop-filter: blur(3px);
+}
+.modal {
+  background: var(--surface); border:1px solid var(--border);
+  border-radius: 18px; box-shadow: var(--shadow-lg);
+  width: 100%; max-width: 520px; padding: 1.4rem; max-height: 90vh; overflow:auto;
+  animation: pop .15s ease-out;
+}
+@keyframes pop { from { transform: scale(.96); opacity:0 } to { transform: scale(1); opacity:1 } }
+
+/* ---------- Misc ---------- */
+.muted { color: var(--text-dim); }
+.row { display:flex; align-items:center; justify-content:space-between; gap:1rem; }
+.spacer { flex: 1; }
+.empty { text-align:center; padding: 2.5rem 1rem; color: var(--text-dim); }
+.empty .em { font-size: 2.5rem; display:block; margin-bottom:.5rem; }
+.error-banner { background: var(--red-bg); color: var(--red); padding:.6rem .9rem; border-radius:10px; font-weight:600; font-size:.9rem; }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 8px; }
