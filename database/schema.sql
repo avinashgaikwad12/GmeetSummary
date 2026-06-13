@@ -20,12 +20,13 @@ CREATE INDEX IF NOT EXISTS idx_summaries_created_at
 
 -- One row per Google account that has ever signed in (upserted on each login).
 CREATE TABLE IF NOT EXISTS users (
-    id          SERIAL PRIMARY KEY,
-    google_sub  TEXT        UNIQUE NOT NULL,   -- Google's stable user id ("sub")
-    email       TEXT        NOT NULL,
-    name        TEXT,
-    picture     TEXT,                          -- profile photo URL
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+    id              SERIAL PRIMARY KEY,
+    google_sub      TEXT        UNIQUE NOT NULL,   -- Google's stable user id ("sub")
+    email           TEXT        NOT NULL,
+    name            TEXT,
+    picture         TEXT,                          -- profile photo URL
+    access_enabled  BOOLEAN     NOT NULL DEFAULT true,  -- admin can block login
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 -- One row per successful login event (the login audit log).

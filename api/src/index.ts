@@ -13,6 +13,16 @@ app.set("trust proxy", true);
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
 const googleClient = new OAuth2Client(GOOGLE_CLIENT_ID);
 
+// Admins (comma-separated emails) see the Admin page and can never be blocked.
+const ADMIN_EMAILS = (process.env.ADMIN_EMAILS ?? "")
+  .split(",")
+  .map((e) => e.trim().toLowerCase())
+  .filter(Boolean);
+
+function isAdminEmail(email?: string | null): boolean {
+  return !!email && ADMIN_EMAILS.includes(email.toLowerCase());
+}
+
 // Allow the Vercel frontend to call this API from the browser.
 // In production, lock this down to your exact Vercel URL via the
 // CORS_ORIGIN env var (e.g. https://gmeet-summary.vercel.app).
@@ -52,19 +62,29 @@ app.post("/api/auth/google", async (req, res) => {
     }
 
     const { sub, email, name, picture } = payload;
+    const admin = isAdminEmail(email);
 
-    // Upsert the user keyed on Google's stable subject id.
+    // Upsert the user keyed on Google's stable subject id. We do NOT touch
+    // access_enabled here so an admin's Block/Allow decision is preserved.
     const userResult = await pool.query(
       `INSERT INTO users (google_sub, email, name, picture)
        VALUES ($1, $2, $3, $4)
        ON CONFLICT (google_sub)
        DO UPDATE SET email = EXCLUDED.email, name = EXCLUDED.name, picture = EXCLUDED.picture
-       RETURNING id`,
+       RETURNING id, access_enabled`,
       [sub, email, name ?? null, picture ?? null]
     );
     const userId = userResult.rows[0].id;
+    const accessEnabled = userResult.rows[0].access_enabled;
 
-    // Record this login event in the audit log.
+    // Enforce access control: blocked users can't sign in (admins are exempt).
+    if (!accessEnabled && !admin) {
+      return res
+        .status(403)
+        .json({ error: "Your access has been disabled by the administrator." });
+    }
+
+    // Record this (successful) login event in the audit log.
     const ip = (req.headers["x-forwarded-for"] as string) || req.ip || null;
     const userAgent = req.headers["user-agent"] ?? null;
     await pool.query(
@@ -73,10 +93,91 @@ app.post("/api/auth/google", async (req, res) => {
       [userId, email, name ?? null, ip, userAgent]
     );
 
-    res.json({ email, name, picture });
+    res.json({ email, name, picture, isAdmin: admin });
   } catch (err) {
     console.error("Google login failed:", err);
     res.status(401).json({ error: "Invalid Google token" });
+  }
+});
+
+// ---- Admin -----------------------------------------------------------
+
+// Middleware: require a valid Google ID token whose email is an admin.
+// The frontend sends the token as "Authorization: Bearer <id_token>".
+async function requireAdmin(
+  req: express.Request,
+  res: express.Response,
+  next: express.NextFunction
+) {
+  const header = req.headers.authorization ?? "";
+  const token = header.startsWith("Bearer ") ? header.slice(7) : "";
+  if (!token) {
+    return res.status(401).json({ error: "Not authenticated" });
+  }
+  try {
+    const ticket = await googleClient.verifyIdToken({
+      idToken: token,
+      audience: GOOGLE_CLIENT_ID,
+    });
+    const email = ticket.getPayload()?.email;
+    if (!isAdminEmail(email)) {
+      return res.status(403).json({ error: "Admins only" });
+    }
+    next();
+  } catch {
+    // Token expired or invalid — the admin needs to sign in again.
+    return res.status(401).json({ error: "Session expired, please sign in again" });
+  }
+}
+
+// All users with their access flag (for the admin user list).
+app.get("/api/admin/users", requireAdmin, async (_req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT id, email, name, picture, access_enabled, created_at
+       FROM users ORDER BY created_at DESC`
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to fetch users" });
+  }
+});
+
+// Full login history (newest first).
+app.get("/api/admin/logins", requireAdmin, async (_req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT id, email, name, ip, user_agent, logged_in_at
+       FROM logins ORDER BY logged_in_at DESC LIMIT 500`
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to fetch logins" });
+  }
+});
+
+// Toggle a user's login access. Body: { enabled: boolean }
+app.patch("/api/admin/users/:id/access", requireAdmin, async (req, res) => {
+  const id = Number(req.params.id);
+  const { enabled } = req.body ?? {};
+  if (!Number.isInteger(id) || typeof enabled !== "boolean") {
+    return res.status(400).json({ error: "id and boolean 'enabled' are required" });
+  }
+  try {
+    const result = await pool.query(
+      `UPDATE users SET access_enabled = $1 WHERE id = $2
+       RETURNING id, email, name, picture, access_enabled, created_at`,
+      [enabled, id]
+    );
+    if (result.rowCount === 0) {
+      return res.status(404).json({ error: "User not found" });
+    }
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to update access" });
   }
 });
 

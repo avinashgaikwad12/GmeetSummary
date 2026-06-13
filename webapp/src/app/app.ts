@@ -1,27 +1,33 @@
 import { Component, signal, inject, OnInit, AfterViewInit, NgZone } from '@angular/core';
+import { DatePipe } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { SummaryService, Summary } from './summary.service';
 import { AuthService } from './auth.service';
+import { AdminService, AdminUser, LoginRecord } from './admin.service';
 import { environment } from '../environments/environment';
 
 // Google Identity Services is loaded from index.html and attaches to window.
 declare const google: any;
 
+type View = 'app' | 'admin';
+
 @Component({
   selector: 'app-root',
-  imports: [FormsModule],
+  imports: [FormsModule, DatePipe],
   templateUrl: './app.html',
   styleUrl: './app.css',
 })
 export class App implements OnInit, AfterViewInit {
   private service = inject(SummaryService);
   private auth = inject(AuthService);
+  private admin = inject(AdminService);
   private zone = inject(NgZone);
 
   // Auth state (exposed to the template).
   readonly user = this.auth.user;
   protected readonly authError = signal<string | null>(null);
   protected readonly signingIn = signal(false);
+  protected readonly view = signal<View>('app');
 
   // Summaries state.
   protected readonly summaries = signal<Summary[]>([]);
@@ -29,6 +35,12 @@ export class App implements OnInit, AfterViewInit {
   protected readonly error = signal<string | null>(null);
   protected title = '';
   protected transcript = '';
+
+  // Admin state.
+  protected readonly adminUsers = signal<AdminUser[]>([]);
+  protected readonly logins = signal<LoginRecord[]>([]);
+  protected readonly adminLoading = signal(false);
+  protected readonly adminError = signal<string | null>(null);
 
   ngOnInit(): void {
     if (this.user()) {
@@ -78,9 +90,12 @@ export class App implements OnInit, AfterViewInit {
         this.signingIn.set(false);
         this.refresh();
       },
-      error: () => {
+      error: (err) => {
         this.signingIn.set(false);
-        this.authError.set('Sign-in failed. Please try again.');
+        // 403 => blocked by admin; show the server's message.
+        this.authError.set(
+          err?.error?.error ?? 'Sign-in failed. Please try again.'
+        );
       },
     });
   }
@@ -91,8 +106,57 @@ export class App implements OnInit, AfterViewInit {
     }
     this.auth.logout();
     this.summaries.set([]);
+    this.view.set('app');
     // Re-render the Google button for the next login.
     setTimeout(() => this.initGoogleButton(), 0);
+  }
+
+  // ---- Navigation ------------------------------------------------------
+
+  showApp(): void {
+    this.view.set('app');
+  }
+
+  showAdmin(): void {
+    this.view.set('admin');
+    this.loadAdmin();
+  }
+
+  // ---- Admin -----------------------------------------------------------
+
+  loadAdmin(): void {
+    this.adminLoading.set(true);
+    this.adminError.set(null);
+    this.admin.listUsers().subscribe({
+      next: (users) => this.adminUsers.set(users),
+      error: (err) => this.adminError.set(this.adminMsg(err)),
+    });
+    this.admin.listLogins().subscribe({
+      next: (rows) => {
+        this.logins.set(rows);
+        this.adminLoading.set(false);
+      },
+      error: (err) => {
+        this.adminError.set(this.adminMsg(err));
+        this.adminLoading.set(false);
+      },
+    });
+  }
+
+  toggleAccess(u: AdminUser): void {
+    const next = !u.access_enabled;
+    this.admin.setAccess(u.id, next).subscribe({
+      next: (updated) =>
+        this.adminUsers.update((list) =>
+          list.map((x) => (x.id === updated.id ? updated : x))
+        ),
+      error: (err) => this.adminError.set(this.adminMsg(err)),
+    });
+  }
+
+  private adminMsg(err: any): string {
+    if (err?.status === 401) return 'Your session expired — please log out and sign in again.';
+    return err?.error?.error ?? 'Something went wrong loading admin data.';
   }
 
   // ---- Summaries -------------------------------------------------------

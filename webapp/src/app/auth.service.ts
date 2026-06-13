@@ -7,9 +7,11 @@ export interface User {
   email: string;
   name: string | null;
   picture: string | null;
+  isAdmin?: boolean;
 }
 
-const STORAGE_KEY = 'gmeet_user';
+const USER_KEY = 'gmeet_user';
+const TOKEN_KEY = 'gmeet_token';
 
 @Injectable({ providedIn: 'root' })
 export class AuthService {
@@ -20,6 +22,14 @@ export class AuthService {
   // so a page refresh keeps you logged in.
   readonly user = signal<User | null>(this.restore());
 
+  // The Google ID token, sent as a Bearer token on admin requests. It expires
+  // ~1h after login; admin calls then 401 and prompt a re-login.
+  private credential: string | null = localStorage.getItem(TOKEN_KEY);
+
+  get token(): string | null {
+    return this.credential;
+  }
+
   /** Send the Google ID token to the API, which verifies it and logs the login. */
   loginWithGoogle(credential: string): Observable<User> {
     return this.http
@@ -27,19 +37,23 @@ export class AuthService {
       .pipe(
         tap((user) => {
           this.user.set(user);
-          localStorage.setItem(STORAGE_KEY, JSON.stringify(user));
+          this.credential = credential;
+          localStorage.setItem(USER_KEY, JSON.stringify(user));
+          localStorage.setItem(TOKEN_KEY, credential);
         })
       );
   }
 
   logout(): void {
     this.user.set(null);
-    localStorage.removeItem(STORAGE_KEY);
+    this.credential = null;
+    localStorage.removeItem(USER_KEY);
+    localStorage.removeItem(TOKEN_KEY);
   }
 
   private restore(): User | null {
     try {
-      const raw = localStorage.getItem(STORAGE_KEY);
+      const raw = localStorage.getItem(USER_KEY);
       return raw ? (JSON.parse(raw) as User) : null;
     } catch {
       return null;

@@ -21,6 +21,12 @@
   <!-- ============ LOGGED-IN APP ============ -->
   <header class="topbar">
     <span class="brand">GmeetSummary</span>
+    <nav class="nav">
+      @if (user()?.isAdmin) {
+        <button class="tab" [class.active]="view() === 'app'" (click)="showApp()">App</button>
+        <button class="tab" [class.active]="view() === 'admin'" (click)="showAdmin()">Admin</button>
+      }
+    </nav>
     <span class="user">
       @if (user()?.picture) {
         <img class="avatar" [src]="user()!.picture" alt="" referrerpolicy="no-referrer" />
@@ -30,49 +36,120 @@
     </span>
   </header>
 
-  <main class="container">
-    <!-- Welcome message shown right after a successful login -->
-    <section class="welcome">
-      <h1>Welcome, {{ user()?.name || user()?.email }}! 🎉</h1>
-      <p class="muted">You're signed in as {{ user()?.email }}. Your login was recorded.</p>
-    </section>
+  @if (view() === 'admin' && user()?.isAdmin) {
+    <!-- ============ ADMIN PAGE ============ -->
+    <main class="container">
+      <h1>Admin</h1>
 
-    <section class="card">
-      <h2>New summary</h2>
-      <label>
-        Title
-        <input type="text" [(ngModel)]="title" placeholder="Weekly standup" />
-      </label>
-      <label>
-        Transcript
-        <textarea [(ngModel)]="transcript" rows="5" placeholder="Paste the meeting transcript..."></textarea>
-      </label>
-      <button (click)="add()">Save & summarize</button>
-    </section>
-
-    @if (error()) {
-      <p class="error">{{ error() }}</p>
-    }
-
-    <section>
-      <div class="row">
-        <h2>Summaries</h2>
-        <button class="ghost" (click)="refresh()">Refresh</button>
-      </div>
-
-      @if (loading()) {
-        <p>Loading…</p>
-      } @else if (summaries().length === 0) {
-        <p class="muted">No summaries yet. Add one above.</p>
-      } @else {
-        @for (s of summaries(); track s.id) {
-          <article class="card">
-            <h3>{{ s.title }}</h3>
-            <p>{{ s.summary }}</p>
-            <small class="muted">{{ s.created_at }}</small>
-          </article>
-        }
+      @if (adminError()) {
+        <p class="error">{{ adminError() }}</p>
       }
-    </section>
-  </main>
+
+      <section>
+        <h2>Users &amp; access</h2>
+        <p class="muted">Toggle whether each user is allowed to sign in. Admins can't be blocked.</p>
+        @if (adminUsers().length === 0) {
+          <p class="muted">No users yet.</p>
+        } @else {
+          <table class="grid">
+            <thead>
+              <tr><th>User</th><th>Email</th><th>First seen</th><th>Access</th></tr>
+            </thead>
+            <tbody>
+              @for (u of adminUsers(); track u.id) {
+                <tr>
+                  <td>{{ u.name || '—' }}</td>
+                  <td>{{ u.email }}</td>
+                  <td>{{ u.created_at | date:'medium' }}</td>
+                  <td>
+                    <button
+                      class="toggle"
+                      [class.on]="u.access_enabled"
+                      (click)="toggleAccess(u)">
+                      {{ u.access_enabled ? 'Allowed' : 'Blocked' }}
+                    </button>
+                  </td>
+                </tr>
+              }
+            </tbody>
+          </table>
+        }
+      </section>
+
+      <section>
+        <div class="row">
+          <h2>Login history</h2>
+          <button class="ghost" (click)="loadAdmin()">Refresh</button>
+        </div>
+        @if (adminLoading()) {
+          <p>Loading…</p>
+        } @else if (logins().length === 0) {
+          <p class="muted">No logins recorded yet.</p>
+        } @else {
+          <table class="grid">
+            <thead>
+              <tr><th>When</th><th>Name</th><th>Email</th><th>IP</th></tr>
+            </thead>
+            <tbody>
+              @for (l of logins(); track l.id) {
+                <tr>
+                  <td>{{ l.logged_in_at | date:'medium' }}</td>
+                  <td>{{ l.name || '—' }}</td>
+                  <td>{{ l.email }}</td>
+                  <td class="muted">{{ l.ip || '—' }}</td>
+                </tr>
+              }
+            </tbody>
+          </table>
+        }
+      </section>
+    </main>
+  } @else {
+    <!-- ============ APP (summaries) ============ -->
+    <main class="container">
+      <!-- Welcome message shown right after a successful login -->
+      <section class="welcome">
+        <h1>Welcome, {{ user()?.name || user()?.email }}! 🎉</h1>
+        <p class="muted">You're signed in as {{ user()?.email }}. Your login was recorded.</p>
+      </section>
+
+      <section class="card">
+        <h2>New summary</h2>
+        <label>
+          Title
+          <input type="text" [(ngModel)]="title" placeholder="Weekly standup" />
+        </label>
+        <label>
+          Transcript
+          <textarea [(ngModel)]="transcript" rows="5" placeholder="Paste the meeting transcript..."></textarea>
+        </label>
+        <button (click)="add()">Save & summarize</button>
+      </section>
+
+      @if (error()) {
+        <p class="error">{{ error() }}</p>
+      }
+
+      <section>
+        <div class="row">
+          <h2>Summaries</h2>
+          <button class="ghost" (click)="refresh()">Refresh</button>
+        </div>
+
+        @if (loading()) {
+          <p>Loading…</p>
+        } @else if (summaries().length === 0) {
+          <p class="muted">No summaries yet. Add one above.</p>
+        } @else {
+          @for (s of summaries(); track s.id) {
+            <article class="card">
+              <h3>{{ s.title }}</h3>
+              <p>{{ s.summary }}</p>
+              <small class="muted">{{ s.created_at | date:'medium' }}</small>
+            </article>
+          }
+        }
+      </section>
+    </main>
+  }
 }
