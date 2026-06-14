@@ -1,6 +1,7 @@
 import { Component, inject, signal, OnInit, AfterViewInit, NgZone } from '@angular/core';
 import { Router } from '@angular/router';
 import { AuthService } from '../auth.service';
+import { GoogleCalendarService } from '../google-calendar.service';
 import { environment } from '../../environments/environment';
 
 declare const google: any;
@@ -49,6 +50,7 @@ declare const google: any;
 })
 export class LoginComponent implements OnInit, AfterViewInit {
   private auth = inject(AuthService);
+  private cal = inject(GoogleCalendarService);
   private router = inject(Router);
   private zone = inject(NgZone);
   signingIn = signal(false);
@@ -80,6 +82,12 @@ export class LoginComponent implements OnInit, AfterViewInit {
   private onCredential(credential: string) {
     this.signingIn.set(true);
     this.error.set(null);
+    // Authorize Google Calendar as part of signing in, while the sign-in
+    // gesture is still fresh, so the user grants it once here and never has to
+    // click "Connect" inside the app. For returning users who already granted
+    // it, this resolves silently. Failures are non-fatal — the in-app Connect
+    // button stays as a fallback.
+    this.cal.requestAccess().catch(() => {});
     this.auth.loginWithGoogle(credential).subscribe({
       next: () => { this.signingIn.set(false); this.router.navigate(['/']); },
       error: (err) => {
