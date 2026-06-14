@@ -14,6 +14,14 @@ export interface CreatedEvent {
   rsvp: Rsvp[];
 }
 
+export interface GEvent {
+  id: string;
+  title: string;
+  startISO: string | null;
+  allDay: boolean;
+  htmlLink: string | null;
+}
+
 /**
  * Talks to the Google Calendar API directly from the browser using an OAuth
  * access token obtained via Google Identity Services. We use fetch() (not
@@ -64,6 +72,57 @@ export class GoogleCalendarService {
   /** Public: trigger consent / fetch a token now (call from a click handler). */
   requestAccess(): Promise<string> {
     return this.getToken();
+  }
+
+  /** Silent token: resolves null instead of prompting (safe to call on load). */
+  private getTokenSilent(): Promise<string | null> {
+    this.ensureClient();
+    if (!this.tokenClient) return Promise.resolve(null);
+    if (this.accessToken && Date.now() < this.tokenExpiry) {
+      return Promise.resolve(this.accessToken);
+    }
+    return new Promise<string | null>((resolve) => {
+      this.pending = { resolve: (t) => resolve(t), reject: () => resolve(null) };
+      try {
+        this.tokenClient.requestAccessToken({ prompt: 'none' });
+      } catch {
+        resolve(null);
+      }
+    });
+  }
+
+  /** Whether we currently hold a usable calendar token (no prompt). */
+  isConnected(): boolean {
+    return !!this.accessToken && Date.now() < this.tokenExpiry;
+  }
+
+  /**
+   * List the user's primary-calendar events in a time range.
+   * interactive=true shows the consent popup if needed (call from a click);
+   * interactive=false stays silent and returns null if not connected.
+   */
+  async listEvents(
+    timeMinISO: string,
+    timeMaxISO: string,
+    interactive: boolean
+  ): Promise<GEvent[] | null> {
+    const token = interactive ? await this.getToken() : await this.getTokenSilent();
+    if (!token) return null;
+    const url =
+      `${CAL_BASE}?singleEvents=true&orderBy=startTime&maxResults=250` +
+      `&timeMin=${encodeURIComponent(timeMinISO)}&timeMax=${encodeURIComponent(timeMaxISO)}`;
+    const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+    if (!res.ok) throw new Error(`Calendar API ${res.status}: ${await res.text()}`);
+    const data = await res.json();
+    return (data.items ?? [])
+      .filter((e: any) => e.status !== 'cancelled')
+      .map((e: any) => ({
+        id: e.id,
+        title: e.summary ?? '(no title)',
+        startISO: e.start?.dateTime ?? e.start?.date ?? null,
+        allDay: !e.start?.dateTime,
+        htmlLink: e.htmlLink ?? null,
+      }));
   }
 
   static parseEmails(text: string | null | undefined): string[] {
