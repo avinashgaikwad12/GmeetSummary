@@ -27,10 +27,54 @@ const isAdminEmail = (email?: string | null) =>
   !!email && ADMIN_EMAILS.includes(email.toLowerCase());
 
 // Claude is used to turn meeting transcripts into summaries. Optional — if the
-// key isn't set the summarize endpoint returns a clear 503 instead of crashing.
+// key isn't set the summarize endpoints return a clear 503 instead of crashing.
 const anthropic = process.env.ANTHROPIC_API_KEY
   ? new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
   : null;
+
+const SINGLE_SYSTEM =
+  "You are an expert meeting assistant. Turn the raw transcript into a clear, " +
+  "skimmable summary in Markdown. Respond with only the summary — no preamble.";
+
+const COMBINED_SYSTEM =
+  "You are an expert chief of staff. You are given individual summaries of " +
+  "several meetings. Synthesize them into one consolidated cross-meeting " +
+  "summary in Markdown. Respond with only the summary — no preamble.";
+
+const singlePrompt = (title: string, transcript: string) =>
+  `Meeting title: ${title}\n\nTranscript:\n${transcript}\n\n` +
+  "Produce exactly these sections:\n" +
+  "## Summary\nA 2–4 sentence overview.\n" +
+  "## Key points\n- concise bullets\n" +
+  '## Decisions\n- decisions made (or "None")\n' +
+  '## Action items\n- owner — task with any due date (or "None")';
+
+const combinedPrompt = (blocks: string) =>
+  `Here are summaries from several meetings:\n\n${blocks}\n\n` +
+  "Write a consolidated summary with these sections:\n" +
+  "## Overview\nA short paragraph across all of them.\n" +
+  "## Common themes\n- recurring topics\n" +
+  "## Key decisions\n- decisions across the meetings\n" +
+  "## Consolidated action items\n- owner — task\n" +
+  "## Per-meeting highlights\n- **Meeting** — one line each";
+
+/** Single Claude call that returns the joined text of the response. */
+async function summarizeWithClaude(system: string, user: string): Promise<string> {
+  if (!anthropic) throw new Error("anthropic_not_configured");
+  const message = await anthropic.messages.create({
+    model: "claude-opus-4-8",
+    max_tokens: 2048,
+    thinking: { type: "adaptive" },
+    output_config: { effort: "medium" },
+    system,
+    messages: [{ role: "user", content: user }],
+  });
+  return message.content
+    .filter((b): b is Anthropic.TextBlock => b.type === "text")
+    .map((b) => b.text)
+    .join("\n")
+    .trim();
+}
 
 // ---- Auth types & middleware -----------------------------------------------
 
@@ -250,34 +294,7 @@ app.post("/api/meetings/:id/summarize", requireAuth, async (req: AuthedRequest, 
 
     // Bound the transcript so a very long call can't blow up the request.
     const text = transcript.slice(0, 100_000);
-    const message = await anthropic.messages.create({
-      model: "claude-opus-4-8",
-      max_tokens: 2048,
-      thinking: { type: "adaptive" },
-      output_config: { effort: "medium" },
-      system:
-        "You are an expert meeting assistant. Turn the raw transcript into a clear, " +
-        "skimmable summary in Markdown. Respond with only the summary — no preamble.",
-      messages: [
-        {
-          role: "user",
-          content:
-            `Meeting title: ${owned.rows[0].title}\n\n` +
-            `Transcript:\n${text}\n\n` +
-            "Produce exactly these sections:\n" +
-            "## Summary\nA 2–4 sentence overview.\n" +
-            "## Key points\n- concise bullets\n" +
-            "## Decisions\n- decisions made (or \"None\")\n" +
-            "## Action items\n- owner — task with any due date (or \"None\")",
-        },
-      ],
-    });
-
-    const summary = message.content
-      .filter((b): b is Anthropic.TextBlock => b.type === "text")
-      .map((b) => b.text)
-      .join("\n")
-      .trim();
+    const summary = await summarizeWithClaude(SINGLE_SYSTEM, singlePrompt(owned.rows[0].title, text));
 
     if (!summary) return res.status(502).json({ error: "Empty summary from the model." });
 
@@ -290,6 +307,126 @@ app.post("/api/meetings/:id/summarize", requireAuth, async (req: AuthedRequest, 
   } catch (err) {
     console.error("Summarize failed:", err);
     res.status(502).json({ error: "Could not generate the summary. Please try again." });
+  }
+});
+
+// ---- Per-occurrence sessions (one Meet conference = one session) ------------
+// The same Meet link can host many conferences over time; each becomes its own
+// session row so you get an individual transcript + summary per occurrence.
+
+app.get("/api/meetings/:id/sessions", requireAuth, async (req: AuthedRequest, res) => {
+  const id = Number(req.params.id);
+  try {
+    const r = await pool.query(
+      `SELECT id, conference_record, started_at, ended_at, transcript, summary, created_at
+       FROM meeting_sessions WHERE meeting_id = $1 AND user_email = $2
+       ORDER BY ended_at DESC NULLS LAST, id DESC`,
+      [id, req.user!.email]
+    );
+    res.json(r.rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to fetch sessions" });
+  }
+});
+
+app.post("/api/meetings/:id/sessions", requireAuth, async (req: AuthedRequest, res) => {
+  if (!anthropic)
+    return res
+      .status(503)
+      .json({ error: "Summaries aren't configured on the server (missing ANTHROPIC_API_KEY)." });
+
+  const id = Number(req.params.id);
+  const { conference_record, started_at, ended_at } = req.body ?? {};
+  const transcript = String(req.body?.transcript ?? "").trim();
+  if (!conference_record || !transcript)
+    return res.status(400).json({ error: "conference_record and transcript are required" });
+
+  try {
+    const owned = await pool.query(
+      "SELECT title FROM meetings WHERE id = $1 AND user_email = $2",
+      [id, req.user!.email]
+    );
+    if (!owned.rowCount) return res.status(404).json({ error: "Not found" });
+
+    const text = transcript.slice(0, 100_000);
+    const summary = await summarizeWithClaude(SINGLE_SYSTEM, singlePrompt(owned.rows[0].title, text));
+    if (!summary) return res.status(502).json({ error: "Empty summary from the model." });
+
+    const up = await pool.query(
+      `INSERT INTO meeting_sessions
+         (meeting_id, user_email, conference_record, started_at, ended_at, transcript, summary)
+       VALUES ($1,$2,$3,$4,$5,$6,$7)
+       ON CONFLICT (meeting_id, conference_record) DO UPDATE SET
+         started_at = EXCLUDED.started_at, ended_at = EXCLUDED.ended_at,
+         transcript = EXCLUDED.transcript, summary = EXCLUDED.summary
+       RETURNING id, conference_record, started_at, ended_at, transcript, summary, created_at`,
+      [id, req.user!.email, conference_record, nullIfEmpty(started_at), nullIfEmpty(ended_at), text, summary]
+    );
+
+    // Mirror the most recent session onto the meeting row for quick display.
+    await pool.query(
+      `UPDATE meetings m SET summary = s.summary, transcript = s.transcript, status = 'completed'
+       FROM (SELECT summary, transcript FROM meeting_sessions
+             WHERE meeting_id = $1 ORDER BY ended_at DESC NULLS LAST, id DESC LIMIT 1) s
+       WHERE m.id = $1 AND m.user_email = $2`,
+      [id, req.user!.email]
+    );
+
+    res.json(up.rows[0]);
+  } catch (err) {
+    console.error("Add session failed:", err);
+    res.status(502).json({ error: "Could not summarize this session." });
+  }
+});
+
+// ---- Combined summary across several meetings -------------------------------
+
+app.post("/api/meetings/combined-summary", requireAuth, async (req: AuthedRequest, res) => {
+  if (!anthropic)
+    return res
+      .status(503)
+      .json({ error: "Summaries aren't configured on the server (missing ANTHROPIC_API_KEY)." });
+
+  const ids: number[] = Array.isArray(req.body?.meeting_ids)
+    ? req.body.meeting_ids.map(Number).filter(Number.isInteger)
+    : [];
+  if (ids.length < 2)
+    return res.status(400).json({ error: "Select at least two meetings to combine." });
+
+  try {
+    const email = req.user!.email;
+    const [meetings, sessions] = await Promise.all([
+      pool.query(`SELECT id, title, summary FROM meetings WHERE user_email = $1 AND id = ANY($2::int[])`, [email, ids]),
+      pool.query(
+        `SELECT meeting_id, summary FROM meeting_sessions
+         WHERE user_email = $1 AND meeting_id = ANY($2::int[]) AND summary IS NOT NULL
+         ORDER BY ended_at ASC NULLS LAST, id ASC`,
+        [email, ids]
+      ),
+    ]);
+    if (!meetings.rowCount) return res.status(404).json({ error: "No meetings found." });
+
+    const byMeeting = new Map<number, string[]>();
+    for (const s of sessions.rows) {
+      if (!byMeeting.has(s.meeting_id)) byMeeting.set(s.meeting_id, []);
+      byMeeting.get(s.meeting_id)!.push(s.summary);
+    }
+
+    const blocks: string[] = [];
+    for (const m of meetings.rows) {
+      const parts = byMeeting.get(m.id) ?? (m.summary ? [m.summary] : []);
+      if (parts.length) blocks.push(`## ${m.title}\n${parts.join("\n\n---\n")}`);
+    }
+    if (!blocks.length)
+      return res.status(400).json({ error: "None of the selected meetings have a summary yet." });
+
+    const summary = await summarizeWithClaude(COMBINED_SYSTEM, combinedPrompt(blocks.join("\n\n")));
+    if (!summary) return res.status(502).json({ error: "Empty summary from the model." });
+    res.json({ summary });
+  } catch (err) {
+    console.error("Combined summary failed:", err);
+    res.status(502).json({ error: "Could not build the combined summary." });
   }
 });
 
@@ -468,6 +605,20 @@ app.patch("/api/admin/users/:id/access", requireAdmin, async (req, res) => {
 // Idempotent schema touch-ups so new columns appear without a manual Neon step.
 async function ensureSchema() {
   await pool.query("ALTER TABLE meetings ADD COLUMN IF NOT EXISTS transcript TEXT");
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS meeting_sessions (
+      id SERIAL PRIMARY KEY,
+      meeting_id INTEGER NOT NULL,
+      user_email TEXT NOT NULL,
+      conference_record TEXT NOT NULL,
+      started_at TIMESTAMPTZ,
+      ended_at TIMESTAMPTZ,
+      transcript TEXT,
+      summary TEXT,
+      created_at TIMESTAMPTZ DEFAULT now(),
+      UNIQUE (meeting_id, conference_record)
+    )
+  `);
 }
 
 const port = Number(process.env.PORT) || 3000;

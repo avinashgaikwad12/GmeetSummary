@@ -23,6 +23,16 @@ export interface Meeting {
   created_at: string;
 }
 
+export interface MeetingSession {
+  id: number;
+  conference_record: string;
+  started_at: string | null;
+  ended_at: string | null;
+  transcript: string | null;
+  summary: string | null;
+  created_at: string;
+}
+
 export interface Task {
   id: number;
   title: string;
@@ -62,6 +72,22 @@ export class ApiService {
   /** Send a transcript to the server, which summarizes it with Claude. */
   summarizeMeeting(id: number, transcript: string): Observable<Meeting> {
     return this.http.post<Meeting>(`${this.base}/api/meetings/${id}/summarize`, { transcript });
+  }
+  /** Per-occurrence sessions: one row per Meet conference for a meeting. */
+  listSessions(id: number): Observable<MeetingSession[]> {
+    return this.http.get<MeetingSession[]>(`${this.base}/api/meetings/${id}/sessions`);
+  }
+  addSession(
+    id: number,
+    body: { conference_record: string; started_at?: string | null; ended_at?: string | null; transcript: string }
+  ): Observable<MeetingSession> {
+    return this.http.post<MeetingSession>(`${this.base}/api/meetings/${id}/sessions`, body);
+  }
+  /** One consolidated summary across several meetings. */
+  combinedSummary(meetingIds: number[]): Observable<{ summary: string }> {
+    return this.http.post<{ summary: string }>(`${this.base}/api/meetings/combined-summary`, {
+      meeting_ids: meetingIds,
+    });
   }
 
   // ---- Tasks ----

@@ -2,7 +2,7 @@ import { Component, inject, signal, computed, OnInit, NgZone } from '@angular/co
 import { DatePipe } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { firstValueFrom } from 'rxjs';
-import { ApiService, Meeting, Rsvp } from '../api.service';
+import { ApiService, Meeting, MeetingSession, Rsvp } from '../api.service';
 import { GoogleCalendarService, GEvent } from '../google-calendar.service';
 
 type Form = {
@@ -46,6 +46,11 @@ const RSVP_LABEL: Record<string, string> = {
         } @else {
           <button class="btn btn-sm" (click)="connect()" [disabled]="gLoading()">{{ gLoading() ? 'Connecting…' : 'Connect Google Calendar' }}</button>
         }
+        @if (selected().size > 0) {
+          <button class="btn btn-sm" (click)="combine()" [disabled]="selected().size < 2 || combining()">
+            {{ combining() ? '…' : 'Combine ' + selected().size }}
+          </button>
+        }
         <button class="btn btn-primary" (click)="openCreate()">+ New meeting</button>
       </div>
     </div>
@@ -74,6 +79,10 @@ const RSVP_LABEL: Record<string, string> = {
           <div class="card card-pad mtg">
             <div class="mtg-main">
               <div class="row" style="align-items:flex-start; justify-content:flex-start; gap:.6rem">
+                @if (r.meeting?.summary) {
+                  <input class="pick" type="checkbox" title="Select for combined summary"
+                         [checked]="selected().has(r.meeting!.id)" (change)="togglePick(r.meeting!.id)" />
+                }
                 <h3>{{ r.title }}</h3>
                 <span class="badge {{r.status}}">{{ r.status }}</span>
                 @if (r.source === 'google') { <span class="gtag">📆 Google Calendar</span> }
@@ -94,13 +103,27 @@ const RSVP_LABEL: Record<string, string> = {
               }
               @if (r.meeting?.summary) {
                 <div class="summary">
-                  <div class="summary-h">📝 AI summary</div>
+                  <div class="summary-h">📝 Latest summary</div>
                   <div class="summary-body">{{ r.meeting!.summary }}</div>
-                  @if (r.meeting!.transcript) {
-                    <button class="linkbtn" (click)="toggle(r.meeting!.id)">
-                      {{ expanded()[r.meeting!.id] ? 'Hide transcript' : 'Show full transcript' }}
-                    </button>
-                    @if (expanded()[r.meeting!.id]) { <pre class="transcript">{{ r.meeting!.transcript }}</pre> }
+                  <button class="linkbtn" (click)="toggleSessions(r.meeting!.id)">
+                    {{ sessionsOpen()[r.meeting!.id] ? 'Hide sessions' : 'Show all sessions' }}
+                  </button>
+                  @if (sessionsOpen()[r.meeting!.id]) {
+                    @for (s of sessionsFor(r.meeting!.id); track s.id) {
+                      <div class="session">
+                        <div class="session-h">🗓️ {{ (s.ended_at || s.started_at) ? ((s.ended_at || s.started_at) | date:'EEE, MMM d, y • h:mm a') : 'Session' }}</div>
+                        <div class="summary-body">{{ s.summary }}</div>
+                        @if (s.transcript) {
+                          <button class="linkbtn" (click)="toggleSession(s.id)">
+                            {{ expandedSession()[s.id] ? 'Hide transcript' : 'Show transcript' }}
+                          </button>
+                          @if (expandedSession()[s.id]) { <pre class="transcript">{{ s.transcript }}</pre> }
+                        }
+                      </div>
+                    }
+                    @if ((sessionsFor(r.meeting!.id)).length === 0) {
+                      <div class="muted" style="font-size:.8rem; margin-top:.4rem">No individual sessions stored yet.</div>
+                    }
                   }
                 </div>
               }
@@ -126,6 +149,21 @@ const RSVP_LABEL: Record<string, string> = {
       </div>
     }
     </div>
+
+    <!-- Combined summary modal -->
+    @if (combinedOpen()) {
+      <div class="modal-backdrop" (click)="combinedOpen.set(false)">
+        <div class="modal" (click)="$event.stopPropagation()">
+          <h2>Combined summary · {{ selected().size }} meetings</h2>
+          @if (combining()) { <div class="empty">Summarizing across meetings…</div> }
+          @else { <div class="summary-body" style="max-height:60vh; overflow:auto">{{ combinedText() }}</div> }
+          <div class="row" style="margin-top:.7rem">
+            <span class="spacer"></span>
+            <button class="btn btn-ghost" (click)="combinedOpen.set(false)">Close</button>
+          </div>
+        </div>
+      </div>
+    }
 
     <!-- Modal -->
     @if (modalOpen()) {
@@ -204,6 +242,9 @@ const RSVP_LABEL: Record<string, string> = {
     .linkbtn { margin-top:.5rem; background:none; border:none; color:var(--blue); font-weight:600; font-size:.78rem; cursor:pointer; padding:0; }
     .transcript { margin-top:.5rem; max-height:260px; overflow:auto; white-space:pre-wrap; font-size:.78rem; line-height:1.4;
       background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:.6rem; font-family:inherit; }
+    .session { margin-top:.6rem; padding:.55rem .65rem; background:var(--surface); border:1px solid var(--border); border-radius:8px; }
+    .session-h { font-size:.78rem; font-weight:700; color:var(--text-dim); margin-bottom:.3rem; }
+    .pick { width:auto; margin-top:.25rem; cursor:pointer; }
     .mtg-actions { display:flex; gap:.4rem; flex-shrink:0; flex-wrap:wrap; justify-content:flex-end; max-width:230px; }
     .two { display:grid; grid-template-columns:1fr 1fr; gap:.7rem; }
     .checkrow { display:flex; align-items:flex-start; gap:.6rem; font-size:.85rem; margin:.3rem 0 .9rem; cursor:pointer; }
@@ -238,7 +279,15 @@ export class MeetingsComponent implements OnInit {
   // Per-meeting status messages (e.g. RSVP refresh results).
   syncMsg = signal<Record<number, string>>({});
   summarizing = signal<Record<number, boolean>>({});
-  expanded = signal<Record<number, boolean>>({});
+  // Per-occurrence sessions, keyed by meeting id; transcript expand keyed by session id.
+  sessions = signal<Record<number, MeetingSession[]>>({});
+  sessionsOpen = signal<Record<number, boolean>>({});
+  expandedSession = signal<Record<number, boolean>>({});
+  // Combined-summary selection + modal.
+  selected = signal<Set<number>>(new Set());
+  combinedOpen = signal(false);
+  combining = signal(false);
+  combinedText = signal('');
 
   /** Merged + filtered list shown in the page. */
   rows = computed<Row[]>(() => {
@@ -462,38 +511,97 @@ export class MeetingsComponent implements OnInit {
     }
   }
 
-  toggle(id: number) {
-    this.expanded.update((e) => ({ ...e, [id]: !e[id] }));
+  sessionsFor(id: number): MeetingSession[] {
+    return this.sessions()[id] ?? [];
+  }
+
+  toggleSession(id: number) {
+    this.expandedSession.update((e) => ({ ...e, [id]: !e[id] }));
+  }
+
+  toggleSessions(meetingId: number) {
+    const open = !this.sessionsOpen()[meetingId];
+    this.sessionsOpen.update((s) => ({ ...s, [meetingId]: open }));
+    if (open && !this.sessions()[meetingId]) this.refreshSessions(meetingId, false);
+  }
+
+  private async refreshSessions(meetingId: number, open: boolean) {
+    try {
+      const list = await firstValueFrom(this.api.listSessions(meetingId));
+      this.zone.run(() => {
+        this.sessions.update((s) => ({ ...s, [meetingId]: list }));
+        if (open) this.sessionsOpen.update((s) => ({ ...s, [meetingId]: true }));
+      });
+    } catch { /* ignore */ }
+  }
+
+  togglePick(id: number) {
+    this.selected.update((set) => {
+      const next = new Set(set);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+  }
+
+  combine() {
+    const ids = [...this.selected()];
+    if (ids.length < 2) return;
+    this.combinedOpen.set(true);
+    this.combining.set(true);
+    this.combinedText.set('');
+    this.api.combinedSummary(ids).subscribe({
+      next: ({ summary }) => { this.combining.set(false); this.combinedText.set(summary); },
+      error: (e) => { this.combining.set(false); this.combinedText.set(e?.error?.error ?? 'Could not build the combined summary.'); },
+    });
   }
 
   private setBusy(id: number, on: boolean) {
     this.zone.run(() => this.summarizing.update((s) => ({ ...s, [id]: on })));
   }
 
-  /** Fetch the Meet transcript, summarize it with Claude, and show both. */
+  /**
+   * Summarize every finished Meet conference for this meeting's link that we
+   * haven't summarized yet — one summary per occurrence — then show the list.
+   */
   async generateSummary(m: Meeting) {
     const code = GoogleCalendarService.meetingCode(m.meet_link);
     if (!code) { this.setMsg(m.id, '⚠️ This meeting has no Google Meet link.'); return; }
 
     this.setBusy(m.id, true);
-    this.setMsg(m.id, '⏳ Fetching the transcript from Google Meet…');
+    this.setMsg(m.id, '⏳ Looking up Google Meet sessions…');
     try {
-      const transcript = await this.cal.getMeetTranscript(code, true);
-      if (!transcript) {
-        this.setBusy(m.id, false);
+      const confs = await this.cal.getMeetConferences(code, true);
+      const existing = await firstValueFrom(this.api.listSessions(m.id));
+      const have = new Set(existing.map((s) => s.conference_record));
+      const fresh = confs.filter((c) => !have.has(c.record));
+
+      let added = 0;
+      for (const c of fresh) {
+        this.setMsg(m.id, `🤖 Summarizing session ${added + 1} of ${fresh.length}…`);
+        const t = await this.cal.getTranscriptForRecord(c.record, false);
+        if (!t) continue;
+        await firstValueFrom(
+          this.api.addSession(m.id, {
+            conference_record: c.record,
+            started_at: c.startTime,
+            ended_at: c.endTime,
+            transcript: t,
+          })
+        );
+        added++;
+      }
+
+      this.setBusy(m.id, false);
+      if (added === 0 && existing.length === 0) {
         this.setMsg(
           m.id,
-          'No transcript available yet. Turn on “Transcribe meeting” during the call (host only); transcripts also take a few minutes to be ready after it ends.'
+          'No transcript available yet. Transcription auto-starts when someone joins a meeting created here; transcripts also take a few minutes to be ready after the call ends.'
         );
-        return;
+      } else {
+        this.setMsg(m.id, '');
       }
-      this.setMsg(m.id, '🤖 Summarizing with Claude…');
-      this.zone.run(() => {
-        this.api.summarizeMeeting(m.id, transcript).subscribe({
-          next: () => { this.setBusy(m.id, false); this.setMsg(m.id, ''); this.load(); },
-          error: (e) => { this.setBusy(m.id, false); this.setMsg(m.id, e?.error?.error ?? 'Could not generate the summary.'); },
-        });
-      });
+      await this.refreshSessions(m.id, true);
+      this.load(); // refresh the mirrored latest summary on the card
     } catch (e) {
       this.setBusy(m.id, false);
       this.setMsg(m.id, this.meetErr(e));
@@ -510,25 +618,43 @@ export class MeetingsComponent implements OnInit {
     try {
       const now = Date.now();
       const horizon = now - 60 * 24 * 3600 * 1000; // last 60 days
-      const candidates = this.dbMeetings().filter(
-        (m) =>
-          !!m.google_event_id &&
-          !!m.meet_link &&
-          !m.summary &&
-          !!m.meeting_date &&
-          Date.parse(m.meeting_date) < now &&
-          Date.parse(m.meeting_date) > horizon
-      );
+      // Any of our past meetings with a Meet link — reused links can gain new
+      // occurrences, so we don't skip ones that already have a summary.
+      const candidates = this.dbMeetings()
+        .filter(
+          (m) =>
+            !!m.google_event_id &&
+            !!m.meet_link &&
+            !!m.meeting_date &&
+            Date.parse(m.meeting_date) < now &&
+            Date.parse(m.meeting_date) > horizon
+        )
+        .slice(0, 8); // cap work per run
+
       let changed = false;
       for (const m of candidates) {
         if (!this.throttleOk(m.id)) continue;
         const code = GoogleCalendarService.meetingCode(m.meet_link);
         if (!code) continue;
         try {
-          const transcript = await this.cal.getMeetTranscript(code, false); // silent
-          if (!transcript) continue; // not ended / not ready yet — retry next time
-          await firstValueFrom(this.api.summarizeMeeting(m.id, transcript));
-          changed = true;
+          const confs = await this.cal.getMeetConferences(code, false); // silent
+          if (!confs.length) continue;
+          const existing = await firstValueFrom(this.api.listSessions(m.id));
+          const have = new Set(existing.map((s) => s.conference_record));
+          for (const c of confs) {
+            if (have.has(c.record)) continue;
+            const t = await this.cal.getTranscriptForRecord(c.record, false);
+            if (!t) continue;
+            await firstValueFrom(
+              this.api.addSession(m.id, {
+                conference_record: c.record,
+                started_at: c.startTime,
+                ended_at: c.endTime,
+                transcript: t,
+              })
+            );
+            changed = true;
+          }
         } catch {
           /* background — ignore and let the manual button surface errors */
         }

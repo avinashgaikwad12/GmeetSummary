@@ -191,41 +191,48 @@ export class GoogleCalendarService {
     return m ? m[1] : null;
   }
 
-  /**
-   * Fetch the transcript of the most recent conference for a Meet code via the
-   * Google Meet REST API. Returns null when no transcript exists yet (e.g.
-   * transcription wasn't turned on, or it's still processing). Throws on
-   * auth/permission errors. interactive=true shows the consent popup if needed.
-   */
-  async getMeetTranscript(meetingCode: string, interactive: boolean): Promise<string | null> {
-    const token = interactive ? await this.getToken() : await this.getTokenSilent();
-    if (!token) throw new Error('not_connected');
-    const headers = { Authorization: `Bearer ${token}` };
-    const get = async (url: string) => {
-      const res = await fetch(url, { headers });
+  private meetGet(token: string) {
+    return async (url: string) => {
+      const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
       if (!res.ok) throw new Error(`Meet API ${res.status}: ${await res.text()}`);
       return res.json();
     };
+  }
 
-    // 1. Resolve the space (the meeting code is accepted as the space id).
+  /**
+   * List the ENDED conferences (occurrences) for a Meet code — the same link can
+   * host many over time, and each is its own meeting with its own transcript.
+   * Newest first. Throws on auth/permission errors.
+   */
+  async getMeetConferences(
+    meetingCode: string,
+    interactive: boolean
+  ): Promise<Array<{ record: string; startTime: string | null; endTime: string | null }>> {
+    const token = interactive ? await this.getToken() : await this.getTokenSilent();
+    if (!token) throw new Error('not_connected');
+    const get = this.meetGet(token);
     const space = await get(`${MEET_BASE}/spaces/${encodeURIComponent(meetingCode)}`);
+    const filter = encodeURIComponent(`space.name="${space.name}"`);
+    const records = (await get(`${MEET_BASE}/conferenceRecords?filter=${filter}`)).conferenceRecords ?? [];
+    return records
+      .filter((r: any) => r.endTime) // only finished conferences
+      .map((r: any) => ({ record: r.name, startTime: r.startTime ?? null, endTime: r.endTime ?? null }));
+  }
 
-    // 2. Most recent conference record for that space. Only proceed once the
-    //    conference has ENDED (endTime set) — otherwise the meeting is still
-    //    running and the transcript would be partial.
-    const recFilter = encodeURIComponent(`space.name="${space.name}"`);
-    const records = (await get(`${MEET_BASE}/conferenceRecords?filter=${recFilter}`))
-      .conferenceRecords ?? [];
-    if (!records.length || !records[0].endTime) return null;
-    const record: string = records[0].name; // already newest-first
+  /**
+   * Transcript text for one specific conference record (e.g. "conferenceRecords/x").
+   * Returns null if no finalized transcript exists for it yet.
+   */
+  async getTranscriptForRecord(record: string, interactive: boolean): Promise<string | null> {
+    const token = interactive ? await this.getToken() : await this.getTokenSilent();
+    if (!token) throw new Error('not_connected');
+    const get = this.meetGet(token);
 
-    // 3. First transcript on that conference — only once it's finalized.
     const transcripts = (await get(`${MEET_BASE}/${record}/transcripts`)).transcripts ?? [];
     if (!transcripts.length) return null;
     if (transcripts[0].state && transcripts[0].state !== 'ENDED') return null;
     const transcript: string = transcripts[0].name;
 
-    // 4. Map participant resource names → display names.
     const names = new Map<string, string>();
     try {
       for (const p of (await get(`${MEET_BASE}/${record}/participants`)).participants ?? []) {
@@ -236,7 +243,6 @@ export class GoogleCalendarService {
       }
     } catch { /* names are best-effort */ }
 
-    // 5. Page through the transcript entries and stitch them into text.
     const lines: string[] = [];
     let pageToken = '';
     do {
