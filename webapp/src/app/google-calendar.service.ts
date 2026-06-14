@@ -22,8 +22,14 @@ export interface GEvent {
   id: string;
   title: string;
   startISO: string | null;
+  endISO: string | null;
   allDay: boolean;
   htmlLink: string | null;
+  meetLink: string | null;
+  description: string | null;
+  attendees: string[];
+  /** The current user's RSVP on this event (accepted/declined/tentative/needsAction). */
+  myStatus: string | null;
 }
 
 /**
@@ -155,13 +161,21 @@ export class GoogleCalendarService {
     const data = await res.json();
     return (data.items ?? [])
       .filter((e: any) => e.status !== 'cancelled')
-      .map((e: any) => ({
-        id: e.id,
-        title: e.summary ?? '(no title)',
-        startISO: e.start?.dateTime ?? e.start?.date ?? null,
-        allDay: !e.start?.dateTime,
-        htmlLink: e.htmlLink ?? null,
-      }));
+      .map((e: any) => {
+        const attendees = e.attendees ?? [];
+        return {
+          id: e.id,
+          title: e.summary ?? '(no title)',
+          startISO: e.start?.dateTime ?? e.start?.date ?? null,
+          endISO: e.end?.dateTime ?? e.end?.date ?? null,
+          allDay: !e.start?.dateTime,
+          htmlLink: e.htmlLink ?? null,
+          meetLink: e.hangoutLink ?? null,
+          description: e.description ?? null,
+          attendees: attendees.map((a: any) => a.email).filter(Boolean),
+          myStatus: attendees.find((a: any) => a.self)?.responseStatus ?? null,
+        };
+      });
   }
 
   static parseEmails(text: string | null | undefined): string[] {

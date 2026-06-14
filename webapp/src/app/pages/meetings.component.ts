@@ -1,13 +1,32 @@
-import { Component, inject, signal, OnInit, NgZone } from '@angular/core';
+import { Component, inject, signal, computed, OnInit, NgZone } from '@angular/core';
 import { DatePipe } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { ApiService, Meeting, Rsvp } from '../api.service';
-import { GoogleCalendarService } from '../google-calendar.service';
+import { GoogleCalendarService, GEvent } from '../google-calendar.service';
 
 type Form = {
   title: string; meeting_date: string; attendees: string;
   meet_link: string; notes: string; status: Meeting['status'];
 };
+
+type Status = 'upcoming' | 'completed' | 'cancelled';
+
+/** Unified row: either a MeetHub DB meeting or a Google Calendar event. */
+interface Row {
+  key: string;
+  title: string;
+  dateISO: string | null;
+  dateMs: number;          // for sorting; NaN when no date
+  status: Status;
+  attendees: string | null;
+  notes: string | null;
+  meetLink: string | null;
+  htmlLink: string | null; // Google event page
+  source: 'meethub' | 'google';
+  onGoogle: boolean;       // shows the "On Google Calendar" badge
+  meeting?: Meeting;       // present for source === 'meethub'
+  rsvp?: Rsvp[] | null;
+}
 
 const RSVP_LABEL: Record<string, string> = {
   accepted: 'Accepted', declined: 'Declined', tentative: 'Maybe', needsAction: 'Pending',
@@ -18,8 +37,16 @@ const RSVP_LABEL: Record<string, string> = {
   imports: [DatePipe, FormsModule],
   template: `
     <div class="page-head">
-      <div><h1>Meetings</h1><p class="muted">Plan meetings, sync to Google Calendar & track RSVPs.</p></div>
-      <button class="btn btn-primary" (click)="openCreate()">+ New meeting</button>
+      <div><h1>Meetings</h1><p class="muted">Your MeetHub meetings and Google Calendar events, together.</p></div>
+      <div class="head-actions">
+        @if (connected()) {
+          <span class="synced">📆 Google Calendar</span>
+          <button class="btn btn-sm" (click)="connect()" [disabled]="gLoading()" title="Refresh calendar">{{ gLoading() ? '…' : '↻' }}</button>
+        } @else {
+          <button class="btn btn-sm" (click)="connect()" [disabled]="gLoading()">{{ gLoading() ? 'Connecting…' : 'Connect Google Calendar' }}</button>
+        }
+        <button class="btn btn-primary" (click)="openCreate()">+ New meeting</button>
+      </div>
     </div>
 
     <div class="toolbar">
@@ -29,45 +56,51 @@ const RSVP_LABEL: Record<string, string> = {
         }
       </div>
       <input class="search" type="search" placeholder="🔍 Search meetings…"
-             [(ngModel)]="q" (ngModelChange)="onSearch()" />
+             [ngModel]="q()" (ngModelChange)="q.set($event)" />
     </div>
 
     @if (error()) { <p class="error-banner">{{ error() }}</p> }
+    @if (gError()) { <p class="error-banner">{{ gError() }}</p> }
 
     @if (loading()) {
       <div class="empty">Loading…</div>
-    } @else if (meetings().length === 0) {
-      <div class="card card-pad empty"><span class="em">📅</span>No meetings here yet. Click <b>New meeting</b> to add one.</div>
+    } @else if (rows().length === 0) {
+      <div class="card card-pad empty"><span class="em">📅</span>Nothing here yet. Click <b>New meeting</b> to add one@if (!connected()) {, or <b>Connect Google Calendar</b> to pull in your events}.</div>
     } @else {
       <div class="list">
-        @for (m of meetings(); track m.id) {
+        @for (r of rows(); track r.key) {
           <div class="card card-pad mtg">
             <div class="mtg-main">
               <div class="row" style="align-items:flex-start; justify-content:flex-start; gap:.6rem">
-                <h3>{{ m.title }}</h3>
-                <span class="badge {{m.status}}">{{ m.status }}</span>
-                @if (m.google_event_id) { <span class="synced">📆 On Google Calendar</span> }
+                <h3>{{ r.title }}</h3>
+                <span class="badge {{r.status}}">{{ r.status }}</span>
+                @if (r.source === 'google') { <span class="gtag">📆 Google Calendar</span> }
+                @else if (r.onGoogle) { <span class="synced">📆 On Google Calendar</span> }
               </div>
               <div class="meta">
-                <span>🗓️ {{ m.meeting_date ? (m.meeting_date | date:'EEE, MMM d, y • h:mm a') : 'No date' }}</span>
-                @if (m.attendees) { <span>👥 {{ m.attendees }}</span> }
+                <span>🗓️ {{ r.dateISO ? (r.dateISO | date:'EEE, MMM d, y • h:mm a') : 'No date' }}</span>
+                @if (r.attendees) { <span>👥 {{ r.attendees }}</span> }
               </div>
-              @if (m.notes) { <p class="notes">{{ m.notes }}</p> }
+              @if (r.notes) { <p class="notes">{{ r.notes }}</p> }
 
-              @if (m.rsvp && m.rsvp.length) {
+              @if (r.rsvp && r.rsvp.length) {
                 <div class="rsvps">
-                  @for (r of m.rsvp; track r.email) {
-                    <span class="rsvp {{r.status}}" [title]="r.email">{{ r.email }} · {{ label(r.status) }}</span>
+                  @for (rv of r.rsvp; track rv.email) {
+                    <span class="rsvp {{rv.status}}" [title]="rv.email">{{ rv.email }} · {{ label(rv.status) }}</span>
                   }
                 </div>
               }
-              @if (syncMsg()[m.id]) { <div class="syncmsg">{{ syncMsg()[m.id] }}</div> }
+              @if (r.meeting && syncMsg()[r.meeting.id]) { <div class="syncmsg">{{ syncMsg()[r.meeting.id] }}</div> }
             </div>
             <div class="mtg-actions">
-              @if (m.meet_link) { <a class="btn btn-sm btn-primary" [href]="m.meet_link" target="_blank">Join</a> }
-              @if (m.google_event_id) { <button class="btn btn-sm" (click)="syncRsvp(m)">↻ RSVPs</button> }
-              <button class="btn btn-sm" (click)="openEdit(m)">Edit</button>
-              <button class="btn btn-sm btn-danger" (click)="remove(m)">Delete</button>
+              @if (r.meetLink) { <a class="btn btn-sm btn-primary" [href]="r.meetLink" target="_blank">Join</a> }
+              @if (r.source === 'google') {
+                @if (r.htmlLink) { <a class="btn btn-sm" [href]="r.htmlLink" target="_blank">Open</a> }
+              } @else if (r.meeting) {
+                @if (r.meeting.google_event_id) { <button class="btn btn-sm" (click)="syncRsvp(r.meeting)">↻ RSVPs</button> }
+                <button class="btn btn-sm" (click)="openEdit(r.meeting)">Edit</button>
+                <button class="btn btn-sm btn-danger" (click)="remove(r.meeting)">Delete</button>
+              }
             </div>
           </div>
         }
@@ -120,6 +153,7 @@ const RSVP_LABEL: Record<string, string> = {
   `,
   styles: [`
     .page-head { display:flex; align-items:flex-start; justify-content:space-between; gap:1rem; margin-bottom:1.2rem; }
+    .head-actions { display:flex; align-items:center; gap:.5rem; flex-wrap:wrap; justify-content:flex-end; }
     h1 { font-size:1.5rem; }
     .toolbar { display:flex; align-items:center; justify-content:space-between; gap:1rem; margin-bottom:1rem; flex-wrap:wrap; }
     .tabs { display:flex; gap:.3rem; background:var(--surface); border:1px solid var(--border); padding:.25rem; border-radius:12px; }
@@ -132,6 +166,7 @@ const RSVP_LABEL: Record<string, string> = {
     .mtg-main { min-width:0; flex:1; }
     h3 { font-size:1.05rem; }
     .synced { font-size:.72rem; font-weight:700; color:var(--green); background:var(--green-bg); padding:.15rem .5rem; border-radius:999px; }
+    .gtag { font-size:.72rem; font-weight:700; color:var(--brand); background:#ede9fe; padding:.15rem .5rem; border-radius:999px; }
     .meta { display:flex; flex-wrap:wrap; gap:.9rem; color:var(--text-dim); font-size:.83rem; margin-top:.4rem; }
     .notes { margin:.6rem 0 0; font-size:.88rem; color:var(--text-dim); display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
     .rsvps { display:flex; flex-wrap:wrap; gap:.4rem; margin-top:.7rem; }
@@ -152,13 +187,17 @@ export class MeetingsComponent implements OnInit {
   private cal = inject(GoogleCalendarService);
   private zone = inject(NgZone);
 
-  filters: Array<'all' | Meeting['status']> = ['all', 'upcoming', 'completed', 'cancelled'];
-  meetings = signal<Meeting[]>([]);
+  filters: Array<'all' | Status> = ['all', 'upcoming', 'completed', 'cancelled'];
+  private dbMeetings = signal<Meeting[]>([]);
+  private gEvents = signal<GEvent[]>([]);
   loading = signal(true);
   error = signal<string | null>(null);
-  status = signal<'all' | Meeting['status']>('all');
-  q = '';
-  private searchTimer: any;
+  status = signal<'all' | Status>('all');
+  q = signal('');
+
+  connected = signal(false);
+  gLoading = signal(false);
+  gError = signal<string | null>(null);
 
   modalOpen = signal(false);
   editingId = signal<number | null>(null);
@@ -167,10 +206,77 @@ export class MeetingsComponent implements OnInit {
   syncCal = true;
   form: Form = this.blank();
 
-  // Per-meeting status messages (e.g. calendar sync results).
+  // Per-meeting status messages (e.g. RSVP refresh results).
   syncMsg = signal<Record<number, string>>({});
 
-  ngOnInit() { this.load(); }
+  /** Merged + filtered list shown in the page. */
+  rows = computed<Row[]>(() => {
+    const now = Date.now();
+    const dbs = this.dbMeetings();
+    const synced = new Set(dbs.map((m) => m.google_event_id).filter(Boolean) as string[]);
+
+    const rows: Row[] = dbs.map((m) => ({
+      key: 'm' + m.id,
+      title: m.title,
+      dateISO: m.meeting_date,
+      dateMs: m.meeting_date ? Date.parse(m.meeting_date) : NaN,
+      status: m.status,
+      attendees: m.attendees,
+      notes: m.notes,
+      meetLink: m.meet_link,
+      htmlLink: null,
+      source: 'meethub',
+      onGoogle: !!m.google_event_id,
+      meeting: m,
+      rsvp: m.rsvp,
+    }));
+
+    for (const e of this.gEvents()) {
+      if (synced.has(e.id)) continue; // already shown as a MeetHub meeting
+      const ms = e.startISO ? Date.parse(e.startISO) : NaN;
+      const status: Status =
+        e.myStatus === 'declined' ? 'cancelled' : !isNaN(ms) && ms > now ? 'upcoming' : 'completed';
+      rows.push({
+        key: 'g' + e.id,
+        title: e.title,
+        dateISO: e.startISO,
+        dateMs: ms,
+        status,
+        attendees: e.attendees.length ? e.attendees.join(', ') : null,
+        notes: e.description,
+        meetLink: e.meetLink,
+        htmlLink: e.htmlLink,
+        source: 'google',
+        onGoogle: false,
+      });
+    }
+
+    const st = this.status();
+    const query = this.q().trim().toLowerCase();
+    let out = st === 'all' ? rows : rows.filter((r) => r.status === st);
+    if (query) {
+      out = out.filter(
+        (r) =>
+          r.title.toLowerCase().includes(query) ||
+          (r.attendees ?? '').toLowerCase().includes(query) ||
+          (r.notes ?? '').toLowerCase().includes(query)
+      );
+    }
+
+    const asc = st === 'upcoming';
+    out.sort((a, b) => {
+      if (isNaN(a.dateMs) && isNaN(b.dateMs)) return 0;
+      if (isNaN(a.dateMs)) return 1;
+      if (isNaN(b.dateMs)) return -1;
+      return asc ? a.dateMs - b.dateMs : b.dateMs - a.dateMs;
+    });
+    return out;
+  });
+
+  ngOnInit() {
+    this.load();
+    if (this.cal.wasConnected()) this.syncGoogle(false);
+  }
 
   label(s: string) { return RSVP_LABEL[s] ?? s; }
   private blank(): Form {
@@ -182,14 +288,38 @@ export class MeetingsComponent implements OnInit {
 
   load() {
     this.loading.set(true);
-    this.api.listMeetings(this.status(), this.q).subscribe({
-      next: (m) => { this.meetings.set(m); this.loading.set(false); },
+    // Always fetch every meeting; filtering by tab/search happens client-side so
+    // it can be applied uniformly to Google events too.
+    this.api.listMeetings('all').subscribe({
+      next: (m) => { this.dbMeetings.set(m); this.loading.set(false); },
       error: () => { this.error.set('Could not load meetings.'); this.loading.set(false); },
     });
   }
 
-  setStatus(s: 'all' | Meeting['status']) { this.status.set(s); this.load(); }
-  onSearch() { clearTimeout(this.searchTimer); this.searchTimer = setTimeout(() => this.load(), 300); }
+  connect() { this.syncGoogle(true); }
+
+  /** Pull Google Calendar events into the list (silent unless interactive). */
+  private syncGoogle(interactive: boolean) {
+    // A wide window: recent past (shown as completed) through the next year.
+    const now = new Date();
+    const min = new Date(now); min.setDate(min.getDate() - 90);
+    const max = new Date(now); max.setFullYear(max.getFullYear() + 1);
+    this.gLoading.set(true);
+    this.gError.set(null);
+    this.cal.listEvents(min.toISOString(), max.toISOString(), interactive)
+      .then((events) => this.zone.run(() => {
+        this.gLoading.set(false);
+        if (events === null) { this.connected.set(false); return; }
+        this.connected.set(true);
+        this.gEvents.set(events);
+      }))
+      .catch((e) => this.zone.run(() => {
+        this.gLoading.set(false);
+        this.gError.set(this.calErr(e));
+      }));
+  }
+
+  setStatus(s: 'all' | Status) { this.status.set(s); }
 
   openCreate() { this.editingId.set(null); this.form = this.blank(); this.syncCal = true; this.formError.set(null); this.modalOpen.set(true); }
   openEdit(m: Meeting) {
@@ -280,7 +410,7 @@ export class MeetingsComponent implements OnInit {
     if (s.includes('403') || s.includes('permission') || s.includes('insufficient') || s.includes('disabled'))
       return 'Calendar sync failed — the Google Calendar API may not be enabled, or the scope isn’t added yet. Complete the 2 Google Cloud steps, then retry. (Uncheck the calendar option to save without syncing.)';
     if (s.includes('access_denied') || s.includes('closed') || s.includes('popup') || s.includes('denied'))
-      return 'Calendar permission wasn’t granted (the window was closed or blocked). Click Create meeting again and choose Allow.';
+      return 'Calendar permission wasn’t granted (the window was closed or blocked). Click Connect again and choose Allow.';
     return 'Couldn’t reach Google Calendar. Retry, or uncheck the calendar option to save without syncing.';
   }
 
@@ -300,7 +430,7 @@ export class MeetingsComponent implements OnInit {
   remove(m: Meeting) {
     if (!confirm(`Delete "${m.title}"? This removes it here (the Google Calendar event stays).`)) return;
     this.api.deleteMeeting(m.id).subscribe({
-      next: () => this.meetings.update((l) => l.filter((x) => x.id !== m.id)),
+      next: () => this.dbMeetings.update((l) => l.filter((x) => x.id !== m.id)),
       error: () => this.error.set('Could not delete meeting.'),
     });
   }
