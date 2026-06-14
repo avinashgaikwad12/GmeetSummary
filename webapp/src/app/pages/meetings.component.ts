@@ -275,7 +275,9 @@ export class MeetingsComponent implements OnInit {
 
   ngOnInit() {
     this.load();
-    if (this.cal.wasConnected()) this.syncGoogle(false);
+    // Auto-connect: returning users sync silently; first-timers get Google's
+    // own consent screen right away (no app "Connect" click needed).
+    this.syncGoogle(!this.cal.wasConnected());
   }
 
   label(s: string) { return RSVP_LABEL[s] ?? s; }

@@ -152,7 +152,9 @@ export class DashboardComponent implements OnInit {
 
   ngOnInit() {
     this.load();
-    if (this.cal.wasConnected()) this.syncGoogle();
+    // Auto-connect: returning users sync silently; first-timers get Google's
+    // own consent screen right away (no app "Connect" click needed).
+    this.syncGoogle(!this.cal.wasConnected());
   }
 
   greeting() {
@@ -166,11 +168,11 @@ export class DashboardComponent implements OnInit {
     this.api.listTasks(false).subscribe({ next: (t) => this.openTasks.set(t.slice(0, 5)) });
   }
 
-  private syncGoogle() {
+  private syncGoogle(interactive: boolean) {
     const now = new Date();
     const min = new Date(now); min.setDate(min.getDate() - 90);
     const max = new Date(now); max.setFullYear(max.getFullYear() + 1);
-    this.cal.listEvents(min.toISOString(), max.toISOString(), false)
+    this.cal.listEvents(min.toISOString(), max.toISOString(), interactive)
       .then((events) => this.zone.run(() => {
         if (!events) return;
         const ts = Date.now();
