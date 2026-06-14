@@ -62,6 +62,7 @@ const RSVP_LABEL: Record<string, string> = {
     @if (error()) { <p class="error-banner">{{ error() }}</p> }
     @if (gError()) { <p class="error-banner">{{ gError() }}</p> }
 
+    <div class="scroll">
     @if (loading()) {
       <div class="empty">Loading…</div>
     } @else if (rows().length === 0) {
@@ -106,6 +107,7 @@ const RSVP_LABEL: Record<string, string> = {
         }
       </div>
     }
+    </div>
 
     <!-- Modal -->
     @if (modalOpen()) {
@@ -152,10 +154,13 @@ const RSVP_LABEL: Record<string, string> = {
     }
   `,
   styles: [`
-    .page-head { display:flex; align-items:flex-start; justify-content:space-between; gap:1rem; margin-bottom:1.2rem; }
+    :host { display:flex; flex-direction:column; height: calc(100vh - 105px); min-height: 420px; }
+    .page-head { display:flex; align-items:flex-start; justify-content:space-between; gap:1rem; margin-bottom:1.2rem; flex-shrink:0; }
     .head-actions { display:flex; align-items:center; gap:.5rem; flex-wrap:wrap; justify-content:flex-end; }
     h1 { font-size:1.5rem; }
-    .toolbar { display:flex; align-items:center; justify-content:space-between; gap:1rem; margin-bottom:1rem; flex-wrap:wrap; }
+    .toolbar { display:flex; align-items:center; justify-content:space-between; gap:1rem; margin-bottom:1rem; flex-wrap:wrap; flex-shrink:0; }
+    .error-banner { flex-shrink:0; }
+    .scroll { flex:1; min-height:0; overflow-y:auto; padding-right:.3rem; margin-right:-.3rem; }
     .tabs { display:flex; gap:.3rem; background:var(--surface); border:1px solid var(--border); padding:.25rem; border-radius:12px; }
     .tab { border:none; background:transparent; color:var(--text-dim); font-weight:600; font-size:.85rem;
       padding:.4rem .8rem; border-radius:9px; cursor:pointer; text-transform:capitalize; }
@@ -179,7 +184,7 @@ const RSVP_LABEL: Record<string, string> = {
     .two { display:grid; grid-template-columns:1fr 1fr; gap:.7rem; }
     .checkrow { display:flex; align-items:flex-start; gap:.6rem; font-size:.85rem; margin:.3rem 0 .9rem; cursor:pointer; }
     .checkrow input { width:auto; margin-top:.15rem; }
-    @media (max-width:700px){ .mtg{ flex-direction:column; } .mtg-actions{ max-width:none; } }
+    @media (max-width:700px){ :host{ height:auto; } .mtg{ flex-direction:column; } .mtg-actions{ max-width:none; } }
   `],
 })
 export class MeetingsComponent implements OnInit {
@@ -263,7 +268,8 @@ export class MeetingsComponent implements OnInit {
       );
     }
 
-    const asc = st === 'upcoming';
+    // Chronological: upcoming/all earliest→latest; past lists most-recent first.
+    const asc = st === 'upcoming' || st === 'all';
     out.sort((a, b) => {
       if (isNaN(a.dateMs) && isNaN(b.dateMs)) return 0;
       if (isNaN(a.dateMs)) return 1;
