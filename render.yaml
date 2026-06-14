@@ -15,3 +15,5 @@ services:
         sync: false   # set manually in dashboard (Neon connection string)
       - key: CORS_ORIGIN
         sync: false   # set manually in dashboard (your Vercel URL)
+      - key: ANTHROPIC_API_KEY
+        sync: false   # set manually in dashboard (Claude key for summaries)

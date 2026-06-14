@@ -2,6 +2,7 @@ import express from "express";
 import cors from "cors";
 import { OAuth2Client } from "google-auth-library";
 import jwt from "jsonwebtoken";
+import Anthropic from "@anthropic-ai/sdk";
 import { pool } from "./db";
 
 const app = express();
@@ -24,6 +25,12 @@ const ADMIN_EMAILS = (process.env.ADMIN_EMAILS ?? "")
 
 const isAdminEmail = (email?: string | null) =>
   !!email && ADMIN_EMAILS.includes(email.toLowerCase());
+
+// Claude is used to turn meeting transcripts into summaries. Optional — if the
+// key isn't set the summarize endpoint returns a clear 503 instead of crashing.
+const anthropic = process.env.ANTHROPIC_API_KEY
+  ? new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
+  : null;
 
 // ---- Auth types & middleware -----------------------------------------------
 
@@ -181,7 +188,7 @@ app.post("/api/meetings", requireAuth, async (req: AuthedRequest, res) => {
 });
 
 app.patch("/api/meetings/:id", requireAuth, async (req: AuthedRequest, res) => {
-  const allowed = ["title", "meeting_date", "attendees", "meet_link", "notes", "summary", "status", "google_event_id", "rsvp"];
+  const allowed = ["title", "meeting_date", "attendees", "meet_link", "notes", "summary", "transcript", "status", "google_event_id", "rsvp"];
   const sets: string[] = [];
   const vals: any[] = [];
   for (const f of allowed) {
@@ -218,6 +225,71 @@ app.delete("/api/meetings/:id", requireAuth, async (req: AuthedRequest, res) => 
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Failed to delete meeting" });
+  }
+});
+
+// Turn a meeting transcript into a summary with Claude, then store both and
+// mark the meeting completed. The transcript itself is fetched by the frontend
+// from the Google Meet API and POSTed here.
+app.post("/api/meetings/:id/summarize", requireAuth, async (req: AuthedRequest, res) => {
+  if (!anthropic)
+    return res
+      .status(503)
+      .json({ error: "Summaries aren't configured on the server (missing ANTHROPIC_API_KEY)." });
+
+  const transcript = String(req.body?.transcript ?? "").trim();
+  if (!transcript) return res.status(400).json({ error: "transcript is required" });
+
+  const id = Number(req.params.id);
+  try {
+    const owned = await pool.query(
+      "SELECT title FROM meetings WHERE id = $1 AND user_email = $2",
+      [id, req.user!.email]
+    );
+    if (!owned.rowCount) return res.status(404).json({ error: "Not found" });
+
+    // Bound the transcript so a very long call can't blow up the request.
+    const text = transcript.slice(0, 100_000);
+    const message = await anthropic.messages.create({
+      model: "claude-opus-4-8",
+      max_tokens: 2048,
+      thinking: { type: "adaptive" },
+      output_config: { effort: "medium" },
+      system:
+        "You are an expert meeting assistant. Turn the raw transcript into a clear, " +
+        "skimmable summary in Markdown. Respond with only the summary — no preamble.",
+      messages: [
+        {
+          role: "user",
+          content:
+            `Meeting title: ${owned.rows[0].title}\n\n` +
+            `Transcript:\n${text}\n\n` +
+            "Produce exactly these sections:\n" +
+            "## Summary\nA 2–4 sentence overview.\n" +
+            "## Key points\n- concise bullets\n" +
+            "## Decisions\n- decisions made (or \"None\")\n" +
+            "## Action items\n- owner — task with any due date (or \"None\")",
+        },
+      ],
+    });
+
+    const summary = message.content
+      .filter((b): b is Anthropic.TextBlock => b.type === "text")
+      .map((b) => b.text)
+      .join("\n")
+      .trim();
+
+    if (!summary) return res.status(502).json({ error: "Empty summary from the model." });
+
+    const updated = await pool.query(
+      `UPDATE meetings SET summary = $1, transcript = $2, status = 'completed'
+       WHERE id = $3 AND user_email = $4 RETURNING *`,
+      [summary, text, id, req.user!.email]
+    );
+    res.json(updated.rows[0]);
+  } catch (err) {
+    console.error("Summarize failed:", err);
+    res.status(502).json({ error: "Could not generate the summary. Please try again." });
   }
 });
 
@@ -393,5 +465,14 @@ app.patch("/api/admin/users/:id/access", requireAdmin, async (req, res) => {
 
 // ---- Start -----------------------------------------------------------------
 
+// Idempotent schema touch-ups so new columns appear without a manual Neon step.
+async function ensureSchema() {
+  await pool.query("ALTER TABLE meetings ADD COLUMN IF NOT EXISTS transcript TEXT");
+}
+
 const port = Number(process.env.PORT) || 3000;
-app.listen(port, "0.0.0.0", () => console.log(`API listening on 0.0.0.0:${port}`));
+ensureSchema()
+  .catch((err) => console.error("Schema check failed (continuing):", err.message))
+  .finally(() =>
+    app.listen(port, "0.0.0.0", () => console.log(`API listening on 0.0.0.0:${port}`))
+  );

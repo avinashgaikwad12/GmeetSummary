@@ -16,6 +16,7 @@ export interface Meeting {
   meet_link: string | null;
   notes: string | null;
   summary: string | null;
+  transcript?: string | null;
   status: 'upcoming' | 'completed' | 'cancelled';
   google_event_id?: string | null;
   rsvp?: Rsvp[] | null;
@@ -57,6 +58,10 @@ export class ApiService {
   }
   deleteMeeting(id: number): Observable<unknown> {
     return this.http.delete(`${this.base}/api/meetings/${id}`);
+  }
+  /** Send a transcript to the server, which summarizes it with Claude. */
+  summarizeMeeting(id: number, transcript: string): Observable<Meeting> {
+    return this.http.post<Meeting>(`${this.base}/api/meetings/${id}/summarize`, { transcript });
   }
 
   // ---- Tasks ----

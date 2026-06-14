@@ -4,8 +4,12 @@ import { Rsvp } from './api.service';
 
 declare const google: any;
 
-const CAL_SCOPE = 'https://www.googleapis.com/auth/calendar.events';
+// Calendar (create events, read RSVPs) + Meet (read past conference transcripts).
+const CAL_SCOPE =
+  'https://www.googleapis.com/auth/calendar.events ' +
+  'https://www.googleapis.com/auth/meetings.space.readonly';
 const CAL_BASE = 'https://www.googleapis.com/calendar/v3/calendars/primary/events';
+const MEET_BASE = 'https://meet.googleapis.com/v2';
 // Remembers (across reloads) that the user granted access at least once, so we
 // only attempt the silent on-load sync for returning users. First-time visitors
 // see no popup until they actually click "Connect".
@@ -176,6 +180,73 @@ export class GoogleCalendarService {
           myStatus: attendees.find((a: any) => a.self)?.responseStatus ?? null,
         };
       });
+  }
+
+  /** Pull the Meet code (e.g. "abc-defg-hij") out of a meet.google.com link. */
+  static meetingCode(meetLink: string | null | undefined): string | null {
+    if (!meetLink) return null;
+    const m = meetLink.match(/meet\.google\.com\/([a-z0-9-]+)/i);
+    return m ? m[1] : null;
+  }
+
+  /**
+   * Fetch the transcript of the most recent conference for a Meet code via the
+   * Google Meet REST API. Returns null when no transcript exists yet (e.g.
+   * transcription wasn't turned on, or it's still processing). Throws on
+   * auth/permission errors. interactive=true shows the consent popup if needed.
+   */
+  async getMeetTranscript(meetingCode: string, interactive: boolean): Promise<string | null> {
+    const token = interactive ? await this.getToken() : await this.getTokenSilent();
+    if (!token) throw new Error('not_connected');
+    const headers = { Authorization: `Bearer ${token}` };
+    const get = async (url: string) => {
+      const res = await fetch(url, { headers });
+      if (!res.ok) throw new Error(`Meet API ${res.status}: ${await res.text()}`);
+      return res.json();
+    };
+
+    // 1. Resolve the space (the meeting code is accepted as the space id).
+    const space = await get(`${MEET_BASE}/spaces/${encodeURIComponent(meetingCode)}`);
+
+    // 2. Most recent conference record for that space.
+    const recFilter = encodeURIComponent(`space.name="${space.name}"`);
+    const records = (await get(`${MEET_BASE}/conferenceRecords?filter=${recFilter}`))
+      .conferenceRecords ?? [];
+    if (!records.length) return null;
+    const record: string = records[0].name; // already newest-first
+
+    // 3. First transcript on that conference.
+    const transcripts = (await get(`${MEET_BASE}/${record}/transcripts`)).transcripts ?? [];
+    if (!transcripts.length) return null;
+    const transcript: string = transcripts[0].name;
+
+    // 4. Map participant resource names → display names.
+    const names = new Map<string, string>();
+    try {
+      for (const p of (await get(`${MEET_BASE}/${record}/participants`)).participants ?? []) {
+        names.set(
+          p.name,
+          p.signedinUser?.displayName ?? p.anonymousUser?.displayName ?? p.phoneUser?.displayName ?? 'Participant'
+        );
+      }
+    } catch { /* names are best-effort */ }
+
+    // 5. Page through the transcript entries and stitch them into text.
+    const lines: string[] = [];
+    let pageToken = '';
+    do {
+      const url =
+        `${MEET_BASE}/${transcript}/entries?pageSize=1000` +
+        (pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : '');
+      const data = await get(url);
+      for (const e of data.transcriptEntries ?? []) {
+        const who = names.get(e.participant) ?? 'Speaker';
+        if (e.text) lines.push(`${who}: ${e.text}`);
+      }
+      pageToken = data.nextPageToken ?? '';
+    } while (pageToken);
+
+    return lines.length ? lines.join('\n') : null;
   }
 
   static parseEmails(text: string | null | undefined): string[] {

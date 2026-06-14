@@ -91,6 +91,18 @@ const RSVP_LABEL: Record<string, string> = {
                   }
                 </div>
               }
+              @if (r.meeting?.summary) {
+                <div class="summary">
+                  <div class="summary-h">📝 AI summary</div>
+                  <div class="summary-body">{{ r.meeting!.summary }}</div>
+                  @if (r.meeting!.transcript) {
+                    <button class="linkbtn" (click)="toggle(r.meeting!.id)">
+                      {{ expanded()[r.meeting!.id] ? 'Hide transcript' : 'Show full transcript' }}
+                    </button>
+                    @if (expanded()[r.meeting!.id]) { <pre class="transcript">{{ r.meeting!.transcript }}</pre> }
+                  }
+                </div>
+              }
               @if (r.meeting && syncMsg()[r.meeting.id]) { <div class="syncmsg">{{ syncMsg()[r.meeting.id] }}</div> }
             </div>
             <div class="mtg-actions">
@@ -98,6 +110,11 @@ const RSVP_LABEL: Record<string, string> = {
               @if (r.source === 'google') {
                 @if (r.htmlLink) { <a class="btn btn-sm" [href]="r.htmlLink" target="_blank">Open</a> }
               } @else if (r.meeting) {
+                @if (r.meetLink) {
+                  <button class="btn btn-sm" (click)="generateSummary(r.meeting)" [disabled]="summarizing()[r.meeting.id]">
+                    {{ summarizing()[r.meeting.id] ? '…' : (r.meeting.summary ? '↻ Summary' : '🪄 Transcript & summary') }}
+                  </button>
+                }
                 @if (r.meeting.google_event_id) { <button class="btn btn-sm" (click)="syncRsvp(r.meeting)">↻ RSVPs</button> }
                 <button class="btn btn-sm" (click)="openEdit(r.meeting)">Edit</button>
                 <button class="btn btn-sm btn-danger" (click)="remove(r.meeting)">Delete</button>
@@ -180,6 +197,12 @@ const RSVP_LABEL: Record<string, string> = {
     .rsvp.declined { background:var(--red-bg); color:var(--red); }
     .rsvp.tentative { background:var(--amber-bg); color:var(--amber); }
     .syncmsg { margin-top:.5rem; font-size:.8rem; color:var(--text-dim); }
+    .summary { margin-top:.7rem; padding:.7rem .8rem; background:var(--surface-2); border:1px solid var(--border); border-radius:10px; }
+    .summary-h { font-size:.75rem; font-weight:700; color:var(--brand); text-transform:uppercase; letter-spacing:.04em; margin-bottom:.35rem; }
+    .summary-body { font-size:.86rem; white-space:pre-wrap; line-height:1.45; }
+    .linkbtn { margin-top:.5rem; background:none; border:none; color:var(--blue); font-weight:600; font-size:.78rem; cursor:pointer; padding:0; }
+    .transcript { margin-top:.5rem; max-height:260px; overflow:auto; white-space:pre-wrap; font-size:.78rem; line-height:1.4;
+      background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:.6rem; font-family:inherit; }
     .mtg-actions { display:flex; gap:.4rem; flex-shrink:0; flex-wrap:wrap; justify-content:flex-end; max-width:230px; }
     .two { display:grid; grid-template-columns:1fr 1fr; gap:.7rem; }
     .checkrow { display:flex; align-items:flex-start; gap:.6rem; font-size:.85rem; margin:.3rem 0 .9rem; cursor:pointer; }
@@ -213,6 +236,8 @@ export class MeetingsComponent implements OnInit {
 
   // Per-meeting status messages (e.g. RSVP refresh results).
   syncMsg = signal<Record<number, string>>({});
+  summarizing = signal<Record<number, boolean>>({});
+  expanded = signal<Record<number, boolean>>({});
 
   /** Merged + filtered list shown in the page. */
   rows = computed<Row[]>(() => {
@@ -433,6 +458,55 @@ export class MeetingsComponent implements OnInit {
     } catch {
       this.setMsg(m.id, '⚠️ Could not refresh RSVPs (calendar permission needed).');
     }
+  }
+
+  toggle(id: number) {
+    this.expanded.update((e) => ({ ...e, [id]: !e[id] }));
+  }
+
+  private setBusy(id: number, on: boolean) {
+    this.zone.run(() => this.summarizing.update((s) => ({ ...s, [id]: on })));
+  }
+
+  /** Fetch the Meet transcript, summarize it with Claude, and show both. */
+  async generateSummary(m: Meeting) {
+    const code = GoogleCalendarService.meetingCode(m.meet_link);
+    if (!code) { this.setMsg(m.id, '⚠️ This meeting has no Google Meet link.'); return; }
+
+    this.setBusy(m.id, true);
+    this.setMsg(m.id, '⏳ Fetching the transcript from Google Meet…');
+    try {
+      const transcript = await this.cal.getMeetTranscript(code, true);
+      if (!transcript) {
+        this.setBusy(m.id, false);
+        this.setMsg(
+          m.id,
+          'No transcript available yet. Turn on “Transcribe meeting” during the call (host only); transcripts also take a few minutes to be ready after it ends.'
+        );
+        return;
+      }
+      this.setMsg(m.id, '🤖 Summarizing with Claude…');
+      this.zone.run(() => {
+        this.api.summarizeMeeting(m.id, transcript).subscribe({
+          next: () => { this.setBusy(m.id, false); this.setMsg(m.id, ''); this.load(); },
+          error: (e) => { this.setBusy(m.id, false); this.setMsg(m.id, e?.error?.error ?? 'Could not generate the summary.'); },
+        });
+      });
+    } catch (e) {
+      this.setBusy(m.id, false);
+      this.setMsg(m.id, this.meetErr(e));
+    }
+  }
+
+  private meetErr(e: any): string {
+    const s = JSON.stringify(e?.message ?? e?.error ?? e ?? '').toLowerCase();
+    if (s.includes('not_connected') || s.includes('denied') || s.includes('closed') || s.includes('popup'))
+      return 'Google permission wasn’t granted. Click the button again and choose Allow (the Meet read-only scope is required).';
+    if (s.includes('403') || s.includes('permission') || s.includes('disabled') || s.includes('insufficient'))
+      return 'Couldn’t read Google Meet — make sure the Google Meet API is enabled in your Cloud project and the meetings scope is added to the OAuth consent screen.';
+    if (s.includes('404') || s.includes('not found'))
+      return 'No conference found for this Meet link yet (the meeting may not have happened, or had no transcript).';
+    return 'Couldn’t fetch the transcript from Google Meet. Please try again.';
   }
 
   remove(m: Meeting) {
