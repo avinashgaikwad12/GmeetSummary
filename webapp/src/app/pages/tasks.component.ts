@@ -2,131 +2,122 @@ import { Component, inject, signal, OnInit, computed } from '@angular/core';
 import { DatePipe } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { ApiService, Task } from '../api.service';
+import { AuthService } from '../auth.service';
 
 @Component({
   selector: 'app-tasks',
   imports: [DatePipe, FormsModule],
   template: `
     <div class="page-head">
-      <div><h1>Action Items</h1><p class="muted">Track follow-ups from your meetings.</p></div>
+      <div>
+        <div class="eyebrow">Action items</div>
+        <h1 class="takeaway">{{ headline() }}</h1>
+      </div>
     </div>
 
-    <!-- Quick add -->
-    <div class="card card-pad addbar">
-      <input class="grow" [(ngModel)]="newTitle" (keyup.enter)="add()" placeholder="Add a new action item…" />
-      <select [(ngModel)]="newPriority" title="Priority">
-        <option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option>
-      </select>
-      <input type="date" [(ngModel)]="newDue" title="Due date" />
+    <div class="card card-pad" style="display:flex; gap:.6rem; align-items:center; flex-wrap:wrap; margin-bottom:1.1rem">
+      <input style="flex:1; min-width:200px" [(ngModel)]="newTitle" (keyup.enter)="add()" placeholder="Add an action item…" />
+      <select style="width:auto" [(ngModel)]="newPriority" title="Priority"><option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option></select>
+      <input style="width:auto" type="date" [(ngModel)]="newDue" title="Due date" />
       <button class="btn btn-primary" (click)="add()" [disabled]="!newTitle.trim()">Add</button>
     </div>
 
-    <div class="tabs">
-      @for (f of filters; track f.key) {
-        <button class="tab" [class.active]="filter()===f.key" (click)="setFilter(f.key)">{{ f.label }}</button>
-      }
+    <div class="filters">
+      <input class="search-inp" type="search" placeholder="⌕ Search action items…" [ngModel]="q()" (ngModelChange)="q.set($event)" />
+      <div class="seg">
+        @for (f of statusFilters; track f) { <button [class.active]="statusF()===f" (click)="statusF.set(f)">{{ f }}</button> }
+      </div>
     </div>
 
     @if (error()) { <p class="error-banner">{{ error() }}</p> }
 
-    @if (visible().length === 0) {
-      <div class="card card-pad empty"><span class="em">🎯</span>No action items here.</div>
+    @if (loading()) {
+      <div class="table-wrap" style="padding:1rem">@for (i of [1,2,3,4]; track i) { <div class="skel skel-line" style="height:34px;margin:.5rem 0"></div> }</div>
+    } @else if (visible().length === 0) {
+      <div class="table-wrap"><div class="empty"><span class="em">✔</span><div class="et">Nothing here</div><div>{{ q() || statusF()!=='all' ? 'No items match your filters.' : 'Add an action item or generate one from a meeting summary.' }}</div></div></div>
     } @else {
-      <div class="list">
-        @for (t of visible(); track t.id) {
-          <div class="card card-pad task" [class.done]="t.done">
-            <button class="check" [class.on]="t.done" (click)="toggle(t)" [attr.aria-label]="t.done?'Mark open':'Mark done'">
-              {{ t.done ? '✓' : '' }}
-            </button>
-            <div class="t-main">
-              <div class="t-title">{{ t.title }}</div>
-              <div class="t-meta">
-                <span class="badge {{t.priority}}">{{ t.priority }}</span>
-                @if (t.due_date) { <span class="due" [class.overdue]="isOverdue(t)">📅 {{ t.due_date | date:'MMM d, y' }}</span> }
-                @if (t.meeting_title) { <span class="muted">· {{ t.meeting_title }}</span> }
-              </div>
-            </div>
-            <button class="btn btn-sm btn-danger" (click)="remove(t)">✕</button>
-          </div>
-        }
+      <div class="table-wrap">
+        <table class="data">
+          <thead><tr><th></th><th>Action item</th><th>Owner</th><th>Source meeting</th><th>Priority</th><th>Due date</th><th>Status</th><th></th></tr></thead>
+          <tbody>
+            @for (t of visible(); track t.id) {
+              <tr>
+                <td style="width:36px" (click)="toggle(t)">
+                  <span class="check" [class.on]="t.done">{{ t.done ? '✓' : '' }}</span>
+                </td>
+                <td><div class="cell-title" [class.struck]="t.done">{{ t.title }}</div></td>
+                <td>{{ owner() }}</td>
+                <td>{{ t.meeting_title || '—' }}</td>
+                <td><span class="badge {{ t.priority }}">{{ t.priority }}</span></td>
+                <td [class.overdue]="isOverdue(t)">{{ t.due_date ? (t.due_date | date:'MMM d, y') : '—' }}</td>
+                <td><span class="status {{ t.done ? 'done' : 'open' }}">{{ t.done ? 'Done' : 'Open' }}</span></td>
+                <td style="text-align:right"><button class="btn btn-sm btn-danger" (click)="remove(t)">✕</button></td>
+              </tr>
+            }
+          </tbody>
+        </table>
       </div>
     }
   `,
   styles: [`
-    .page-head { margin-bottom:1.1rem; } h1 { font-size:1.5rem; }
-    .addbar { display:flex; gap:.6rem; align-items:center; margin-bottom:1.1rem; flex-wrap:wrap; }
-    .addbar .grow { flex:1; min-width:180px; }
-    .addbar select, .addbar input[type=date] { width:auto; }
-    .tabs { display:flex; gap:.3rem; background:var(--surface); border:1px solid var(--border); padding:.25rem; border-radius:12px; width:fit-content; margin-bottom:1rem; }
-    .tab { border:none; background:transparent; color:var(--text-dim); font-weight:600; font-size:.85rem; padding:.4rem .9rem; border-radius:9px; cursor:pointer; }
-    .tab.active { background:var(--brand-grad); color:#fff; }
-    .list { display:flex; flex-direction:column; gap:.6rem; }
-    .task { display:flex; align-items:center; gap:.9rem; }
-    .task.done .t-title { text-decoration:line-through; color:var(--text-dim); }
-    .check { width:26px; height:26px; flex-shrink:0; border-radius:50%; border:2px solid var(--border);
-      background:var(--surface); cursor:pointer; font-weight:800; color:#fff; display:flex; align-items:center; justify-content:center; }
-    .check.on { background:var(--green); border-color:var(--green); }
-    .t-main { flex:1; min-width:0; }
-    .t-title { font-weight:600; font-size:.95rem; }
-    .t-meta { display:flex; align-items:center; gap:.5rem; margin-top:.3rem; font-size:.78rem; flex-wrap:wrap; }
-    .due.overdue { color:var(--red); font-weight:700; }
+    .check { width:24px; height:24px; border-radius:50%; border:2px solid var(--line-2); background:var(--surface); cursor:pointer; font-weight:800; color:#fff; display:inline-flex; align-items:center; justify-content:center; font-size:.8rem; }
+    .check.on { background:var(--ok); border-color:var(--ok); }
+    .struck { text-decoration:line-through; color:var(--text-mute); }
+    td.overdue { color:var(--danger); font-weight:700; }
   `],
 })
 export class TasksComponent implements OnInit {
   private api = inject(ApiService);
+  private auth = inject(AuthService);
 
-  filters = [
-    { key: 'open', label: 'Open' },
-    { key: 'done', label: 'Done' },
-    { key: 'all', label: 'All' },
-  ] as const;
-
+  statusFilters = ['all', 'open', 'done'] as const;
+  statusF = signal<(typeof this.statusFilters)[number]>('open');
+  q = signal('');
   tasks = signal<Task[]>([]);
-  filter = signal<'open' | 'done' | 'all'>('open');
+  loading = signal(true);
   error = signal<string | null>(null);
 
-  newTitle = '';
-  newPriority: Task['priority'] = 'medium';
-  newDue = '';
+  newTitle = ''; newPriority: Task['priority'] = 'medium'; newDue = '';
+
+  owner = computed(() => this.auth.user()?.name || this.auth.user()?.email || 'You');
+  headline = computed(() => {
+    if (this.loading()) return 'Track follow-ups across every meeting';
+    const open = this.tasks().filter((t) => !t.done).length;
+    return open === 0 ? 'All action items are closed' : `${open} open action ${open === 1 ? 'item' : 'items'} across your meetings`;
+  });
 
   visible = computed(() => {
-    const f = this.filter();
-    return this.tasks().filter((t) => f === 'all' || (f === 'done' ? t.done : !t.done));
+    const f = this.statusF(); const query = this.q().trim().toLowerCase();
+    return this.tasks().filter((t) => {
+      if (f === 'open' && t.done) return false;
+      if (f === 'done' && !t.done) return false;
+      if (query && !(t.title.toLowerCase().includes(query) || (t.meeting_title ?? '').toLowerCase().includes(query))) return false;
+      return true;
+    });
   });
 
   ngOnInit() { this.load(); }
-
   load() {
+    this.loading.set(true);
     this.api.listTasks().subscribe({
-      next: (t) => this.tasks.set(t),
-      error: () => this.error.set('Could not load action items.'),
+      next: (t) => { this.tasks.set(t); this.loading.set(false); },
+      error: () => { this.error.set('Could not load action items.'); this.loading.set(false); },
     });
   }
-
-  setFilter(f: 'open' | 'done' | 'all') { this.filter.set(f); }
-
   add() {
-    const title = this.newTitle.trim();
-    if (!title) return;
+    const title = this.newTitle.trim(); if (!title) return;
     this.api.createTask({ title, priority: this.newPriority, due_date: this.newDue || undefined }).subscribe({
       next: (t) => { this.tasks.update((l) => [t, ...l]); this.newTitle = ''; this.newDue = ''; this.newPriority = 'medium'; },
       error: () => this.error.set('Could not add item.'),
     });
   }
-
   toggle(t: Task) {
     this.api.updateTask(t.id, { done: !t.done }).subscribe({
       next: (u) => this.tasks.update((l) => l.map((x) => (x.id === u.id ? { ...x, done: u.done } : x))),
     });
   }
-
   remove(t: Task) {
-    this.api.deleteTask(t.id).subscribe({
-      next: () => this.tasks.update((l) => l.filter((x) => x.id !== t.id)),
-    });
+    this.api.deleteTask(t.id).subscribe({ next: () => this.tasks.update((l) => l.filter((x) => x.id !== t.id)) });
   }
-
-  isOverdue(t: Task): boolean {
-    return !t.done && !!t.due_date && new Date(t.due_date) < new Date(new Date().toDateString());
-  }
+  isOverdue(t: Task): boolean { return !t.done && !!t.due_date && new Date(t.due_date) < new Date(new Date().toDateString()); }
 }
