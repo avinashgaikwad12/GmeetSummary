@@ -6,6 +6,10 @@ declare const google: any;
 
 const CAL_SCOPE = 'https://www.googleapis.com/auth/calendar.events';
 const CAL_BASE = 'https://www.googleapis.com/calendar/v3/calendars/primary/events';
+// Remembers (across reloads) that the user granted access at least once, so we
+// only attempt the silent on-load sync for returning users. First-time visitors
+// see no popup until they actually click "Connect".
+const HINT_KEY = 'gcal_connected';
 
 export interface CreatedEvent {
   eventId: string;
@@ -39,17 +43,30 @@ export class GoogleCalendarService {
     this.tokenClient = google.accounts.oauth2.initTokenClient({
       client_id: environment.googleClientId,
       scope: CAL_SCOPE,
+      // Fires on success and on OAuth-level errors (e.g. access_denied).
       callback: (resp: any) => {
-        if (resp.error) {
-          this.pending?.reject(resp);
-        } else {
+        if (resp && resp.access_token) {
           this.accessToken = resp.access_token;
           this.tokenExpiry = Date.now() + (resp.expires_in ?? 3600) * 1000 - 60000;
-          this.pending?.resolve(resp.access_token);
+          this.setHint(true);
+          this.settle(resp.access_token, null);
+        } else {
+          this.settle(null, resp ?? new Error('No access token returned'));
         }
-        this.pending = undefined;
       },
+      // Fires for everything the callback doesn't: silent (prompt:'none')
+      // failures, popup closed/blocked, etc. Without this the promise hangs.
+      error_callback: (err: any) => this.settle(null, err ?? new Error('Authorization failed')),
     });
+  }
+
+  /** Resolve or reject the in-flight request exactly once, then clear it. */
+  private settle(token: string | null, err: any): void {
+    const p = this.pending;
+    this.pending = undefined;
+    if (!p) return;
+    if (token) p.resolve(token);
+    else p.reject(err);
   }
 
   /** Returns a valid calendar access token, prompting the user if needed. */
@@ -61,9 +78,12 @@ export class GoogleCalendarService {
     if (this.accessToken && Date.now() < this.tokenExpiry) {
       return Promise.resolve(this.accessToken);
     }
+    // Cancel any in-flight request (e.g. the silent on-load attempt) so this
+    // user-initiated click wins and its popup isn't torn down by a collision.
+    this.settle(null, new Error('superseded'));
     return new Promise<string>((resolve, reject) => {
       this.pending = { resolve, reject };
-      // No prompt override: Google shows the consent popup the first time and
+      // Default prompt: Google shows the consent popup the first time and
       // returns the token silently afterwards. (Must be called from a click.)
       this.tokenClient.requestAccessToken();
     });
@@ -81,12 +101,13 @@ export class GoogleCalendarService {
     if (this.accessToken && Date.now() < this.tokenExpiry) {
       return Promise.resolve(this.accessToken);
     }
+    if (this.pending) return Promise.resolve(null); // don't disturb an in-flight request
     return new Promise<string | null>((resolve) => {
       this.pending = { resolve: (t) => resolve(t), reject: () => resolve(null) };
       try {
         this.tokenClient.requestAccessToken({ prompt: 'none' });
       } catch {
-        resolve(null);
+        this.settle(null, new Error('silent token request failed'));
       }
     });
   }
@@ -94,6 +115,24 @@ export class GoogleCalendarService {
   /** Whether we currently hold a usable calendar token (no prompt). */
   isConnected(): boolean {
     return !!this.accessToken && Date.now() < this.tokenExpiry;
+  }
+
+  /** True if the user has granted access before (persisted across reloads). */
+  wasConnected(): boolean {
+    try {
+      return localStorage.getItem(HINT_KEY) === '1';
+    } catch {
+      return false;
+    }
+  }
+
+  private setHint(on: boolean): void {
+    try {
+      if (on) localStorage.setItem(HINT_KEY, '1');
+      else localStorage.removeItem(HINT_KEY);
+    } catch {
+      /* storage unavailable (private mode) — silent sync just won't persist */
+    }
   }
 
   /**

@@ -151,7 +151,9 @@ export class CalendarComponent implements OnInit {
 
   ngOnInit() {
     this.api.listMeetings('all').subscribe({ next: (m) => this.meetings.set(m) });
-    this.syncGoogle(false); // try silently on load
+    // Only attempt the silent sync for returning users who already granted
+    // access — first-time visitors see no popup until they click "Connect".
+    if (this.cal.wasConnected()) this.syncGoogle(false);
   }
 
   connect() { this.syncGoogle(true); }
