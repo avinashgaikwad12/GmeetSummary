@@ -1,6 +1,7 @@
 import { Component, inject, signal, computed, OnInit, NgZone } from '@angular/core';
 import { DatePipe } from '@angular/common';
 import { FormsModule } from '@angular/forms';
+import { firstValueFrom } from 'rxjs';
 import { ApiService, Meeting, Rsvp } from '../api.service';
 import { GoogleCalendarService, GEvent } from '../google-calendar.service';
 
@@ -324,7 +325,7 @@ export class MeetingsComponent implements OnInit {
     // Always fetch every meeting; filtering by tab/search happens client-side so
     // it can be applied uniformly to Google events too.
     this.api.listMeetings('all').subscribe({
-      next: (m) => { this.dbMeetings.set(m); this.loading.set(false); },
+      next: (m) => { this.dbMeetings.set(m); this.loading.set(false); this.autoSummarizePast(); },
       error: () => { this.error.set('Could not load meetings.'); this.loading.set(false); },
     });
   }
@@ -345,6 +346,7 @@ export class MeetingsComponent implements OnInit {
         if (events === null) { this.connected.set(false); return; }
         this.connected.set(true);
         this.gEvents.set(events);
+        this.autoSummarizePast(); // now that we hold a token, try past meetings
       }))
       .catch((e) => this.zone.run(() => {
         this.gLoading.set(false);
@@ -495,6 +497,58 @@ export class MeetingsComponent implements OnInit {
     } catch (e) {
       this.setBusy(m.id, false);
       this.setMsg(m.id, this.meetErr(e));
+    }
+  }
+
+  // Background: for our own past meetings that have a Meet link but no summary
+  // yet, silently fetch the (auto-generated) transcript and summarize it, so it
+  // just appears once the meeting is over — no click needed.
+  private autoRunning = false;
+  private async autoSummarizePast() {
+    if (this.autoRunning || !this.cal.isConnected()) return;
+    this.autoRunning = true;
+    try {
+      const now = Date.now();
+      const horizon = now - 60 * 24 * 3600 * 1000; // last 60 days
+      const candidates = this.dbMeetings().filter(
+        (m) =>
+          !!m.google_event_id &&
+          !!m.meet_link &&
+          !m.summary &&
+          !!m.meeting_date &&
+          Date.parse(m.meeting_date) < now &&
+          Date.parse(m.meeting_date) > horizon
+      );
+      let changed = false;
+      for (const m of candidates) {
+        if (!this.throttleOk(m.id)) continue;
+        const code = GoogleCalendarService.meetingCode(m.meet_link);
+        if (!code) continue;
+        try {
+          const transcript = await this.cal.getMeetTranscript(code, false); // silent
+          if (!transcript) continue; // not ended / not ready yet — retry next time
+          await firstValueFrom(this.api.summarizeMeeting(m.id, transcript));
+          changed = true;
+        } catch {
+          /* background — ignore and let the manual button surface errors */
+        }
+      }
+      if (changed) this.zone.run(() => this.load());
+    } finally {
+      this.autoRunning = false;
+    }
+  }
+
+  /** Avoid re-attempting the same meeting more than once every 5 minutes. */
+  private throttleOk(id: number): boolean {
+    try {
+      const k = 'mh_sum_try:' + id;
+      const last = Number(localStorage.getItem(k) || 0);
+      if (Date.now() - last < 5 * 60 * 1000) return false;
+      localStorage.setItem(k, String(Date.now()));
+      return true;
+    } catch {
+      return true;
     }
   }
 

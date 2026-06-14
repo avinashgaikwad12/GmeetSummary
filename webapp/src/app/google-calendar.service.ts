@@ -4,9 +4,11 @@ import { Rsvp } from './api.service';
 
 declare const google: any;
 
-// Calendar (create events, read RSVPs) + Meet (read past conference transcripts).
+// Calendar (create events, read RSVPs) + Meet (create auto-transcribing spaces,
+// read past conference transcripts).
 const CAL_SCOPE =
   'https://www.googleapis.com/auth/calendar.events ' +
+  'https://www.googleapis.com/auth/meetings.space.created ' +
   'https://www.googleapis.com/auth/meetings.space.readonly';
 const CAL_BASE = 'https://www.googleapis.com/calendar/v3/calendars/primary/events';
 const MEET_BASE = 'https://meet.googleapis.com/v2';
@@ -208,16 +210,19 @@ export class GoogleCalendarService {
     // 1. Resolve the space (the meeting code is accepted as the space id).
     const space = await get(`${MEET_BASE}/spaces/${encodeURIComponent(meetingCode)}`);
 
-    // 2. Most recent conference record for that space.
+    // 2. Most recent conference record for that space. Only proceed once the
+    //    conference has ENDED (endTime set) — otherwise the meeting is still
+    //    running and the transcript would be partial.
     const recFilter = encodeURIComponent(`space.name="${space.name}"`);
     const records = (await get(`${MEET_BASE}/conferenceRecords?filter=${recFilter}`))
       .conferenceRecords ?? [];
-    if (!records.length) return null;
+    if (!records.length || !records[0].endTime) return null;
     const record: string = records[0].name; // already newest-first
 
-    // 3. First transcript on that conference.
+    // 3. First transcript on that conference — only once it's finalized.
     const transcripts = (await get(`${MEET_BASE}/${record}/transcripts`)).transcripts ?? [];
     if (!transcripts.length) return null;
+    if (transcripts[0].state && transcripts[0].state !== 'ENDED') return null;
     const transcript: string = transcripts[0].name;
 
     // 4. Map participant resource names → display names.
@@ -261,6 +266,41 @@ export class GoogleCalendarService {
     );
   }
 
+  /**
+   * Create a Meet space whose transcription auto-starts when anyone joins, so a
+   * transcript is always generated for meetings made through this app — no
+   * manual "Transcribe" click. Returns null if the space can't be created (e.g.
+   * the account lacks the transcription feature), so callers can fall back.
+   */
+  private async createMeetSpace(
+    token: string
+  ): Promise<{ meetingUri: string; meetingCode: string } | null> {
+    try {
+      const res = await fetch(`${MEET_BASE}/spaces`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          config: {
+            accessType: 'OPEN', // anyone with the link can join (invited or not)
+            artifactConfig: {
+              transcriptionConfig: { autoTranscriptionGeneration: 'ON' },
+            },
+          },
+        }),
+      });
+      if (!res.ok) {
+        console.warn('Meet space create failed:', res.status, await res.text());
+        return null;
+      }
+      const s = await res.json();
+      if (!s.meetingUri || !s.meetingCode) return null;
+      return { meetingUri: s.meetingUri, meetingCode: s.meetingCode };
+    } catch (e) {
+      console.warn('Meet space create error:', e);
+      return null;
+    }
+  }
+
   /** Create a calendar event (with Meet link) and invite attendees. */
   async createEvent(opts: {
     title: string;
@@ -272,20 +312,34 @@ export class GoogleCalendarService {
     const token = await this.getToken();
     const start = new Date(opts.startISO);
     const end = new Date(start.getTime() + (opts.durationMins ?? 60) * 60000);
-    const body = {
+
+    // Prefer an auto-transcribing Meet space; fall back to a Calendar-minted
+    // Meet link if the space API isn't available for this account.
+    const space = await this.createMeetSpace(token);
+
+    const body: any = {
       summary: opts.title,
-      description: opts.description ?? '',
+      description:
+        (opts.description ?? '') +
+        (space ? `\n\nJoin Google Meet: ${space.meetingUri}` : ''),
       start: { dateTime: start.toISOString() },
       end: { dateTime: end.toISOString() },
       attendees: opts.attendees.map((email) => ({ email })),
-      conferenceData: {
+    };
+    let url = `${CAL_BASE}?sendUpdates=all`;
+    if (space) {
+      body.location = space.meetingUri;
+    } else {
+      body.conferenceData = {
         createRequest: {
           requestId: 'mh-' + Math.random().toString(36).slice(2),
           conferenceSolutionKey: { type: 'hangoutsMeet' },
         },
-      },
-    };
-    const res = await fetch(`${CAL_BASE}?sendUpdates=all&conferenceDataVersion=1`, {
+      };
+      url += '&conferenceDataVersion=1';
+    }
+
+    const res = await fetch(url, {
       method: 'POST',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
@@ -294,7 +348,7 @@ export class GoogleCalendarService {
     const ev = await res.json();
     return {
       eventId: ev.id,
-      meetLink: ev.hangoutLink ?? null,
+      meetLink: space?.meetingUri ?? ev.hangoutLink ?? null,
       htmlLink: ev.htmlLink ?? null,
       rsvp: (ev.attendees ?? []).map((a: any) => ({ email: a.email, status: a.responseStatus })),
     };
