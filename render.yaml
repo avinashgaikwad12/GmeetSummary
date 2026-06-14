@@ -15,5 +15,7 @@ services:
         sync: false   # set manually in dashboard (Neon connection string)
       - key: CORS_ORIGIN
         sync: false   # set manually in dashboard (your Vercel URL)
+      - key: GEMINI_API_KEY
+        sync: false   # set manually in dashboard (Google AI Studio key — free tier)
       - key: ANTHROPIC_API_KEY
-        sync: false   # set manually in dashboard (Claude key for summaries)
+        sync: false   # optional fallback if GEMINI_API_KEY isn't set
