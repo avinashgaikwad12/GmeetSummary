@@ -12,13 +12,8 @@
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
   <!-- Google Identity Services (Sign in with Google) -->
   <script src="https://accounts.google.com/gsi/client" async defer></script>
-  <script>
-    // Apply saved theme before paint to avoid a flash.
-    (function () {
-      var t = localStorage.getItem('mh_theme') || 'light';
-      document.documentElement.setAttribute('data-theme', t);
-    })();
-  </script>
+  <!-- External (not inline) so the CSP can forbid inline scripts. -->
+  <script src="theme.js"></script>
 </head>
 <body>
   <app-root></app-root>

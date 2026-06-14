@@ -3,6 +3,7 @@ import cors from "cors";
 import { OAuth2Client } from "google-auth-library";
 import jwt from "jsonwebtoken";
 import Anthropic from "@anthropic-ai/sdk";
+import rateLimit from "express-rate-limit";
 import { pool } from "./db";
 
 const app = express();
@@ -11,6 +12,25 @@ app.use(express.json());
 app.set("trust proxy", true);
 
 app.use(cors({ origin: process.env.CORS_ORIGIN ?? "*" }));
+
+// ---- Rate limiting ---------------------------------------------------------
+// `trust proxy` is true (Render sits in front), so disable express-rate-limit's
+// permissive-proxy guard; IPs come from Render's X-Forwarded-For.
+const validate = { trustProxy: false };
+const apiLimiter = rateLimit({
+  windowMs: 60_000, max: 120, standardHeaders: true, legacyHeaders: false, validate,
+  message: { error: "Too many requests — please slow down." },
+});
+const authLimiter = rateLimit({
+  windowMs: 15 * 60_000, max: 30, standardHeaders: true, legacyHeaders: false, validate,
+  message: { error: "Too many sign-in attempts — try again later." },
+});
+const summaryLimiter = rateLimit({
+  windowMs: 60_000, max: 15, standardHeaders: true, legacyHeaders: false, validate,
+  message: { error: "Too many summary requests — try again shortly." },
+});
+// /health stays unlimited (Render pings it); everything under /api is capped.
+app.use("/api", apiLimiter);
 
 // ---- Config ----------------------------------------------------------------
 
@@ -160,7 +180,7 @@ app.get("/health", (_req, res) => res.json({ status: "ok" }));
 
 // ---- Auth: Sign in with Google ---------------------------------------------
 
-app.post("/api/auth/google", async (req, res) => {
+app.post("/api/auth/google", authLimiter, async (req, res) => {
   const { credential } = req.body ?? {};
   if (!credential) return res.status(400).json({ error: "credential is required" });
   if (!GOOGLE_CLIENT_ID)
@@ -307,7 +327,7 @@ app.delete("/api/meetings/:id", requireAuth, async (req: AuthedRequest, res) => 
 // Turn a meeting transcript into a summary with Claude, then store both and
 // mark the meeting completed. The transcript itself is fetched by the frontend
 // from the Google Meet API and POSTed here.
-app.post("/api/meetings/:id/summarize", requireAuth, async (req: AuthedRequest, res) => {
+app.post("/api/meetings/:id/summarize", summaryLimiter, requireAuth, async (req: AuthedRequest, res) => {
   if (!summariesEnabled)
     return res
       .status(503)
@@ -362,7 +382,7 @@ app.get("/api/meetings/:id/sessions", requireAuth, async (req: AuthedRequest, re
   }
 });
 
-app.post("/api/meetings/:id/sessions", requireAuth, async (req: AuthedRequest, res) => {
+app.post("/api/meetings/:id/sessions", summaryLimiter, requireAuth, async (req: AuthedRequest, res) => {
   if (!summariesEnabled)
     return res
       .status(503)
@@ -414,7 +434,7 @@ app.post("/api/meetings/:id/sessions", requireAuth, async (req: AuthedRequest, r
 
 // ---- Combined summary across several meetings -------------------------------
 
-app.post("/api/meetings/combined-summary", requireAuth, async (req: AuthedRequest, res) => {
+app.post("/api/meetings/combined-summary", summaryLimiter, requireAuth, async (req: AuthedRequest, res) => {
   if (!summariesEnabled)
     return res
       .status(503)
