@@ -14,3 +14,6 @@ webapp/.angular/
 *.log
 .DS_Store
 Thumbs.db
+
+# graphify knowledge-graph output (local tooling)
+graphify-out/

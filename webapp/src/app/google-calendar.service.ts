@@ -1,6 +1,7 @@
-import { Injectable } from '@angular/core';
+import { Injectable, inject } from '@angular/core';
 import { environment } from '../environments/environment';
 import { Rsvp } from './api.service';
+import { AuthService } from './auth.service';
 
 declare const google: any;
 
@@ -45,16 +46,25 @@ export interface GEvent {
  */
 @Injectable({ providedIn: 'root' })
 export class GoogleCalendarService {
+  private auth = inject(AuthService);
   private tokenClient: any = null;
   private accessToken: string | null = null;
   private tokenExpiry = 0;
   private pending?: { resolve: (t: string) => void; reject: (e: any) => void };
+  // The token we've already confirmed belongs to the app-login account, so we
+  // verify the Google account at most once per token (one extra call, not per request).
+  private verifiedToken: string | null = null;
 
   private ensureClient(): void {
     if (this.tokenClient || typeof google === 'undefined' || !google.accounts?.oauth2) return;
     this.tokenClient = google.accounts.oauth2.initTokenClient({
       client_id: environment.googleClientId,
       scope: CAL_SCOPE,
+      // Pin the OAuth popup/silent flow to the SAME account the user logged into
+      // the app with. Without this, Google Identity Services silently returns a
+      // token for the browser's DEFAULT Google account, so events were being
+      // created on the wrong person's calendar (#wrong-account).
+      hint: this.auth.user()?.email ?? '',
       // Fires on success and on OAuth-level errors (e.g. access_denied).
       callback: (resp: any) => {
         if (resp && resp.access_token) {
@@ -82,23 +92,62 @@ export class GoogleCalendarService {
   }
 
   /** Returns a valid calendar access token, prompting the user if needed. */
-  private getToken(): Promise<string> {
+  private async getToken(): Promise<string> {
     this.ensureClient();
     if (!this.tokenClient) {
-      return Promise.reject(new Error('Google Identity Services not loaded yet.'));
+      throw new Error('Google Identity Services not loaded yet.');
     }
+    let token: string;
     if (this.accessToken && Date.now() < this.tokenExpiry) {
-      return Promise.resolve(this.accessToken);
+      token = this.accessToken;
+    } else {
+      // Cancel any in-flight request (e.g. the silent on-load attempt) so this
+      // user-initiated click wins and its popup isn't torn down by a collision.
+      this.settle(null, new Error('superseded'));
+      token = await new Promise<string>((resolve, reject) => {
+        this.pending = { resolve, reject };
+        // Default prompt: Google shows the consent popup the first time and
+        // returns the token silently afterwards. (Must be called from a click.)
+        // hint pins it to the app-login account.
+        this.tokenClient.requestAccessToken({ hint: this.auth.user()?.email ?? '' });
+      });
     }
-    // Cancel any in-flight request (e.g. the silent on-load attempt) so this
-    // user-initiated click wins and its popup isn't torn down by a collision.
-    this.settle(null, new Error('superseded'));
-    return new Promise<string>((resolve, reject) => {
-      this.pending = { resolve, reject };
-      // Default prompt: Google shows the consent popup the first time and
-      // returns the token silently afterwards. (Must be called from a click.)
-      this.tokenClient.requestAccessToken();
-    });
+    // Refuse to hand back a token for a different Google account than the one
+    // the user signed into the app with — otherwise we'd create events on the
+    // wrong calendar. Throws WRONG_ACCOUNT on mismatch.
+    await this.assertAccount(token);
+    return token;
+  }
+
+  /**
+   * Confirm the access token belongs to the same account the user logged into
+   * the app with. The primary calendar's id IS the account's email, so this
+   * needs only the calendar scope we already hold (no extra OAuth scope).
+   * Best-effort: a network/permission hiccup never blocks (hint already pins
+   * the account); only a confirmed email mismatch throws.
+   */
+  private async assertAccount(token: string): Promise<void> {
+    if (this.verifiedToken === token) return;
+    const appEmail = (this.auth.user()?.email ?? '').toLowerCase();
+    let tokenEmail = '';
+    try {
+      // CAL_BASE is .../calendars/primary/events; strip the trailing /events to
+      // GET the primary calendar resource, whose `id` is the account's email.
+      const res = await fetch(CAL_BASE.replace('/events', ''), {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) tokenEmail = ((await res.json()).id ?? '').toLowerCase();
+    } catch {
+      /* couldn't verify — fall through and trust the hint */
+    }
+    if (appEmail && tokenEmail && tokenEmail !== appEmail) {
+      // Discard the wrong-account token so nothing is ever written to it.
+      this.accessToken = null;
+      this.tokenExpiry = 0;
+      this.verifiedToken = null;
+      throw new Error(`WRONG_ACCOUNT: app=${appEmail} google=${tokenEmail}`);
+    }
+    this.verifiedToken = token;
   }
 
   /** Public: trigger consent / fetch a token now (call from a click handler). */
@@ -107,21 +156,34 @@ export class GoogleCalendarService {
   }
 
   /** Silent token: resolves null instead of prompting (safe to call on load). */
-  private getTokenSilent(): Promise<string | null> {
+  private async getTokenSilent(): Promise<string | null> {
     this.ensureClient();
-    if (!this.tokenClient) return Promise.resolve(null);
+    if (!this.tokenClient) return null;
+    let token: string | null;
     if (this.accessToken && Date.now() < this.tokenExpiry) {
-      return Promise.resolve(this.accessToken);
+      token = this.accessToken;
+    } else {
+      if (this.pending) return null; // don't disturb an in-flight request
+      token = await new Promise<string | null>((resolve) => {
+        this.pending = { resolve: (t) => resolve(t), reject: () => resolve(null) };
+        try {
+          // hint pins the silent flow to the app-login account instead of the
+          // browser's default Google account.
+          this.tokenClient.requestAccessToken({ prompt: 'none', hint: this.auth.user()?.email ?? '' });
+        } catch {
+          this.settle(null, new Error('silent token request failed'));
+        }
+      });
     }
-    if (this.pending) return Promise.resolve(null); // don't disturb an in-flight request
-    return new Promise<string | null>((resolve) => {
-      this.pending = { resolve: (t) => resolve(t), reject: () => resolve(null) };
-      try {
-        this.tokenClient.requestAccessToken({ prompt: 'none' });
-      } catch {
-        this.settle(null, new Error('silent token request failed'));
-      }
-    });
+    if (!token) return null;
+    // Wrong account on the silent path: treat as "not connected" rather than
+    // surfacing an error, so the UI just offers to connect the right account.
+    try {
+      await this.assertAccount(token);
+    } catch {
+      return null;
+    }
+    return token;
   }
 
   /** Whether we currently hold a usable calendar token (no prompt). */

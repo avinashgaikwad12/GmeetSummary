@@ -392,6 +392,8 @@ export class MeetingsComponent implements OnInit {
 
   private meetErr(e: any): string {
     const s = JSON.stringify(e?.message ?? e?.error ?? e ?? '').toLowerCase();
+    if (s.includes('wrong_account'))
+      return 'The Google account you picked doesn’t match the account you’re signed in with. In the Google popup, choose the same account you logged into the app with.';
     if (s.includes('not_connected') || s.includes('denied') || s.includes('closed') || s.includes('popup'))
       return 'Google permission wasn’t granted. Click again and choose Allow.';
     if (s.includes('403') || s.includes('permission') || s.includes('disabled'))

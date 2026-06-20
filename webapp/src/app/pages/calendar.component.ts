@@ -197,6 +197,8 @@ export class CalendarComponent implements OnInit {
 
   private calErr(e: any): string {
     const s = JSON.stringify(e?.message ?? e?.error ?? e ?? '').toLowerCase();
+    if (s.includes('wrong_account'))
+      return 'That Google account doesn’t match the one you signed into the app with. Click “Connect Google Calendar” and pick the same account.';
     if (s.includes('403') || s.includes('permission') || s.includes('disabled'))
       return 'Couldn’t read Google Calendar — make sure the Calendar API is enabled and the calendar scope is added.';
     if (s.includes('denied') || s.includes('closed') || s.includes('popup'))

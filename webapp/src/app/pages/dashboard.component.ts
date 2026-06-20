@@ -16,7 +16,7 @@ interface Item { id: number | null; title: string; dateMs: number; dateISO: stri
         <div class="eyebrow">{{ greeting() }}</div>
         <h1 class="takeaway">{{ headline() }}</h1>
       </div>
-      <a class="btn btn-primary" routerLink="/meetings">+ New meeting</a>
+      <a class="btn btn-primary" routerLink="/meetings">+ New meetingyyyyyyyyyyyyyyy</a>
     </div>
 
     <!-- KPI tiles -->
