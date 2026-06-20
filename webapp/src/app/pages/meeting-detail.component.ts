@@ -5,6 +5,7 @@ import { ActivatedRoute, RouterLink } from '@angular/router';
 import { firstValueFrom } from 'rxjs';
 import { ApiService, Meeting, MeetingSession } from '../api.service';
 import { GoogleCalendarService } from '../google-calendar.service';
+import { AuthService } from '../auth.service';
 
 interface Session { conference_record: string | null; ended_at: string | null; transcript: string | null; summary: string | null; }
 
@@ -121,6 +122,7 @@ export class MeetingDetailComponent implements OnInit {
   private cal = inject(GoogleCalendarService);
   private route = inject(ActivatedRoute);
   private zone = inject(NgZone);
+  private auth = inject(AuthService);
 
   id = Number(this.route.snapshot.paramMap.get('id'));
   meeting = signal<Meeting | null>(null);
@@ -211,17 +213,33 @@ export class MeetingDetailComponent implements OnInit {
       const existing = await firstValueFrom(this.api.listSessions(this.id));
       const have = new Set(existing.map((s) => s.conference_record));
       const fresh = confs.filter((c) => !have.has(c.record));
-      let added = 0;
+      let added = 0, missingTranscript = 0;
       for (const c of fresh) {
         this.zone.run(() => this.msg.set(`Summarizing session ${added + 1} of ${fresh.length}…`));
         const t = await this.cal.getTranscriptForRecord(c.record, false);
-        if (!t) continue;
+        if (!t) { missingTranscript++; continue; }
         await firstValueFrom(this.api.addSession(this.id, { conference_record: c.record, started_at: c.startTime, ended_at: c.endTime, transcript: t }));
         added++;
       }
       this.busy.set(false);
-      if (added === 0 && existing.length === 0) this.msg.set('No transcript available yet — transcripts take a few minutes after a call ends. Try again shortly.');
-      else this.msg.set(null);
+      if (added > 0 || existing.length > 0) {
+        this.msg.set(null);
+      } else if (confs.length === 0) {
+        // No Meet conference visible to this account — usually a wrong-account issue.
+        const who = this.auth.user()?.email ?? 'this account';
+        this.msg.set(
+          `No Google Meet session was found for this link under ${who}. ` +
+          `Meet transcripts are only readable by an account that joined the call — ` +
+          `if it was hosted on a different Google account, sign in to the app with that account.`
+        );
+      } else {
+        // Conferences exist but none had a usable Meet transcript artifact.
+        this.msg.set(
+          `Found ${confs.length} Meet session(s), but ${missingTranscript} had no transcript yet. ` +
+          `Either transcription wasn’t turned on for the call, or it’s still being finalized — try again in a few minutes. ` +
+          `Note: Google’s “Take notes for me” notes are a separate Gemini feature and aren’t available through the Meet API.`
+        );
+      }
       await this.refreshSessions();
       // refresh the meeting (mirrored latest summary)
       this.api.listMeetings('all').subscribe({ next: (l) => this.meeting.set(l.find((x) => x.id === this.id) ?? this.meeting()) });
