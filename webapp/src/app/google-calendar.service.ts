@@ -1,4 +1,4 @@
-import { Injectable, inject } from '@angular/core';
+import { Injectable, inject, effect } from '@angular/core';
 import { environment } from '../environments/environment';
 import { Rsvp } from './api.service';
 import { AuthService } from './auth.service';
@@ -52,8 +52,34 @@ export class GoogleCalendarService {
   private tokenExpiry = 0;
   private pending?: { resolve: (t: string) => void; reject: (e: any) => void };
   // The token we've already confirmed belongs to the app-login account, so we
-  // verify the Google account at most once per token (one extra call, not per request).
+  // verify the Google account at most once per token (one extra call, not per
+  // request). verifiedEmail records WHICH account it was verified for, so a
+  // token validated for user A is never silently reused for user B.
   private verifiedToken: string | null = null;
+  private verifiedEmail: string | null = null;
+  // Tracks the app-login account so we can drop a cached Google token the moment
+  // the user switches accounts (logout→login is SPA-only, no page reload, so this
+  // singleton otherwise keeps the previous user's token; #wrong-account).
+  private lastUserEmail: string | null = this.auth.user()?.email ?? null;
+
+  constructor() {
+    effect(() => {
+      const email = this.auth.user()?.email ?? null;
+      if (email !== this.lastUserEmail) {
+        this.lastUserEmail = email;
+        this.resetToken();
+      }
+    });
+  }
+
+  /** Forget any cached Google token (on account switch / logout). */
+  private resetToken(): void {
+    this.accessToken = null;
+    this.tokenExpiry = 0;
+    this.verifiedToken = null;
+    this.verifiedEmail = null;
+    this.settle(null, new Error('account changed'));
+  }
 
   private ensureClient(): void {
     if (this.tokenClient || typeof google === 'undefined' || !google.accounts?.oauth2) return;
@@ -127,8 +153,10 @@ export class GoogleCalendarService {
    * the account); only a confirmed email mismatch throws.
    */
   private async assertAccount(token: string): Promise<void> {
-    if (this.verifiedToken === token) return;
     const appEmail = (this.auth.user()?.email ?? '').toLowerCase();
+    // Re-verify if EITHER the token or the app account changed since last check —
+    // never trust a token that was only ever validated for a different user.
+    if (this.verifiedToken === token && this.verifiedEmail === appEmail) return;
     let tokenEmail = '';
     try {
       // CAL_BASE is .../calendars/primary/events; strip the trailing /events to
@@ -145,9 +173,11 @@ export class GoogleCalendarService {
       this.accessToken = null;
       this.tokenExpiry = 0;
       this.verifiedToken = null;
+      this.verifiedEmail = null;
       throw new Error(`WRONG_ACCOUNT: app=${appEmail} google=${tokenEmail}`);
     }
     this.verifiedToken = token;
+    this.verifiedEmail = appEmail;
   }
 
   /** Public: trigger consent / fetch a token now (call from a click handler). */
