@@ -20,7 +20,49 @@ export interface Meeting {
   status: 'upcoming' | 'completed' | 'cancelled';
   google_event_id?: string | null;
   rsvp?: Rsvp[] | null;
+  jira_keys?: string[];
   created_at: string;
+}
+
+export interface JiraSummary {
+  jira_key: string;
+  meeting_count: number;
+  with_conclusion: number;
+  first_discussed: string | null;
+  last_discussed: string | null;
+  title: string | null;
+  has_journey: boolean;
+  journey_built_at: string | null;
+}
+
+export interface JiraMeeting {
+  id: number;
+  title: string;
+  meeting_date: string | null;
+  meet_link: string | null;
+  status: Meeting['status'];
+  has_summary: boolean;
+  conclusion: string | null;
+}
+
+export interface JiraDetail {
+  jira_key: string;
+  title: string | null;
+  journey_summary: string | null;
+  journey_built_at: string | null;
+  base_url: string | null;
+  meetings: JiraMeeting[];
+}
+
+export interface MeetingJira {
+  jira_key: string;
+  conclusion: string | null;
+}
+
+export interface JiraMapData {
+  jiras: { jira_key: string; meeting_count: number; title: string | null }[];
+  meetings: { id: number; title: string; meeting_date: string | null }[];
+  edges: { meeting_id: number; jira_key: string }[];
 }
 
 export interface MeetingSession {
@@ -88,6 +130,46 @@ export class ApiService {
     return this.http.post<{ summary: string }>(`${this.base}/api/meetings/combined-summary`, {
       meeting_ids: meetingIds,
     });
+  }
+
+  // ---- Jira tracking ----
+  listJiras(): Observable<JiraSummary[]> {
+    return this.http.get<JiraSummary[]>(`${this.base}/api/jiras`);
+  }
+  getJira(key: string): Observable<JiraDetail> {
+    return this.http.get<JiraDetail>(`${this.base}/api/jiras/${encodeURIComponent(key)}`);
+  }
+  jiraMap(): Observable<JiraMapData> {
+    return this.http.get<JiraMapData>(`${this.base}/api/jira-map`);
+  }
+  setJiraTitle(key: string, title: string): Observable<{ jira_key: string; title: string | null }> {
+    return this.http.patch<{ jira_key: string; title: string | null }>(`${this.base}/api/jiras/${encodeURIComponent(key)}`, { title });
+  }
+  synthesizeJira(key: string): Observable<{ journey_summary: string; journey_built_at: string }> {
+    return this.http.post<{ journey_summary: string; journey_built_at: string }>(`${this.base}/api/jiras/${encodeURIComponent(key)}/synthesize`, {});
+  }
+  listMeetingJiras(meetingId: number): Observable<MeetingJira[]> {
+    return this.http.get<MeetingJira[]>(`${this.base}/api/meetings/${meetingId}/jiras`);
+  }
+  linkJira(meetingId: number, jiraKey: string): Observable<MeetingJira> {
+    return this.http.post<MeetingJira>(`${this.base}/api/meetings/${meetingId}/jiras`, { jira_key: jiraKey });
+  }
+  updateMeetingJira(meetingId: number, key: string, conclusion: string): Observable<MeetingJira> {
+    return this.http.patch<MeetingJira>(`${this.base}/api/meetings/${meetingId}/jiras/${encodeURIComponent(key)}`, { conclusion });
+  }
+  extractMeetingJira(meetingId: number, key: string): Observable<MeetingJira> {
+    return this.http.post<MeetingJira>(`${this.base}/api/meetings/${meetingId}/jiras/${encodeURIComponent(key)}/extract`, {});
+  }
+  unlinkJira(meetingId: number, key: string): Observable<unknown> {
+    return this.http.delete(`${this.base}/api/meetings/${meetingId}/jiras/${encodeURIComponent(key)}`);
+  }
+
+  // ---- Settings ----
+  getSettings(): Observable<{ jira_base_url: string | null }> {
+    return this.http.get<{ jira_base_url: string | null }>(`${this.base}/api/settings`);
+  }
+  saveSettings(body: { jira_base_url: string }): Observable<{ jira_base_url: string | null }> {
+    return this.http.patch<{ jira_base_url: string | null }>(`${this.base}/api/settings`, body);
   }
 
   // ---- Tasks ----

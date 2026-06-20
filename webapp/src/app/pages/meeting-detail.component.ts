@@ -3,15 +3,26 @@ import { DatePipe } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { ActivatedRoute, RouterLink } from '@angular/router';
 import { firstValueFrom } from 'rxjs';
-import { ApiService, Meeting, MeetingSession } from '../api.service';
+import { ApiService, Meeting, MeetingSession, MeetingJira } from '../api.service';
 import { GoogleCalendarService } from '../google-calendar.service';
 import { AuthService } from '../auth.service';
 
 interface Session { conference_record: string | null; ended_at: string | null; transcript: string | null; summary: string | null; }
 
+const JIRA_RE = /\b[A-Z][A-Z0-9]+-\d+\b/g;
+
 @Component({
   selector: 'app-meeting-detail',
   imports: [DatePipe, FormsModule, RouterLink],
+  styles: [`
+    .jchip { display:inline-flex; align-items:center; gap:.35rem; font-family:ui-monospace,Menlo,Consolas,monospace;
+      font-weight:700; font-size:.8rem; background:var(--accent-weak); color:var(--accent); padding:.2rem .25rem .2rem .55rem; border-radius:999px; }
+    .jchip a { color:inherit; }
+    .jchip .x { border:none; background:transparent; color:var(--accent); cursor:pointer; font-size:1rem; line-height:1; padding:0 .25rem; border-radius:50%; }
+    .jchip .x:hover { background:rgba(0,0,0,.08); }
+    .jira-chips { display:flex; flex-wrap:wrap; gap:.4rem; align-items:center; }
+    .suggest { font-family:ui-monospace,Menlo,Consolas,monospace; }
+  `],
   template: `
     <div class="page-head">
       <div>
@@ -44,6 +55,43 @@ interface Session { conference_record: string | null; ended_at: string | null; t
         <div class="panel"><div class="skel skel-line" style="height:300px"></div></div>
       </div>
     } @else if (meeting()) {
+
+      <!-- Jira tickets -->
+      <section class="panel" style="margin-bottom:1.2rem">
+        <div class="panel-head">
+          <h2>Jira tickets</h2>
+          <a class="linkbtn" routerLink="/jira">Open tracker →</a>
+        </div>
+        <div class="jira-chips">
+          @for (j of jiras(); track j.jira_key) {
+            <span class="jchip">
+              @if (jiraBase()) { <a [href]="jiraBase() + j.jira_key" target="_blank" rel="noopener">{{ j.jira_key }} ↗</a> }
+              @else { {{ j.jira_key }} }
+              <button class="x" (click)="unlinkJira(j.jira_key)" title="Remove">×</button>
+            </span>
+          }
+          @if (!jiras().length) { <span class="dim">No tickets linked yet.</span> }
+        </div>
+        <div class="row" style="margin-top:.7rem; gap:.4rem; flex-wrap:wrap">
+          <input [ngModel]="jiraInput()" (ngModelChange)="jiraInput.set($event)" (keyup.enter)="addJira()"
+                 placeholder="PROJ-123" style="max-width:170px; height:34px; text-transform:uppercase" />
+          <button class="btn btn-sm" (click)="addJira()" [disabled]="jiraBusy()">{{ jiraBusy() ? 'Linking…' : 'Add ticket' }}</button>
+          @if (suggested().length) {
+            <span class="dim" style="font-size:.78rem; align-self:center">Detected:</span>
+            @for (s of suggested(); track s) {
+              <button class="btn btn-sm btn-ghost suggest" (click)="addJira(s)" [disabled]="jiraBusy()">+ {{ s }}</button>
+            }
+          }
+        </div>
+        @if (jiraErr()) { <p class="error-banner" style="margin:.7rem 0 0">{{ jiraErr() }}</p> }
+        @if (linkedConclusions().length) {
+          <div style="margin-top:.9rem">
+            @for (j of linkedConclusions(); track j.jira_key) {
+              <div class="sum-section"><h4>{{ j.jira_key }}</h4><div class="body">{{ j.conclusion }}</div></div>
+            }
+          </div>
+        }
+      </section>
 
       @if (sessions().length === 0) {
         <div class="panel">
@@ -135,6 +183,30 @@ export class MeetingDetailComponent implements OnInit {
   idx = signal(0);
   find = signal('');
 
+  // ---- Jira ----
+  jiras = signal<MeetingJira[]>([]);
+  jiraInput = signal('');
+  jiraBusy = signal(false);
+  jiraErr = signal<string | null>(null);
+  jiraBase = signal('');
+
+  linkedConclusions = computed(() => this.jiras().filter((j) => j.conclusion));
+
+  // Auto-detect KEY-123 patterns in this meeting's text, minus already-linked.
+  suggested = computed<string[]>(() => {
+    const linked = new Set(this.jiras().map((j) => j.jira_key));
+    const text = [
+      this.meeting()?.summary ?? '', this.meeting()?.transcript ?? '',
+      ...this.sessions().flatMap((s) => [s.transcript ?? '', s.summary ?? '']),
+    ].join('\n');
+    const found = new Set<string>();
+    for (const m of text.matchAll(JIRA_RE)) {
+      const k = m[0].toUpperCase();
+      if (!linked.has(k)) found.add(k);
+    }
+    return [...found].slice(0, 8);
+  });
+
   // Sessions to display: real per-occurrence rows, or a synthetic one from the
   // meeting's mirrored latest summary/transcript (older single-summary meetings).
   sessions = computed<Session[]>(() => {
@@ -189,10 +261,31 @@ export class MeetingDetailComponent implements OnInit {
       },
       error: () => { this.error.set('Could not load this meeting.'); this.loading.set(false); },
     });
+    this.loadJiras();
+    this.api.getSettings().subscribe({ next: (s) => this.jiraBase.set(s.jira_base_url ?? '') });
   }
 
   private async refreshSessions() {
     try { this.dbSessions.set(await firstValueFrom(this.api.listSessions(this.id))); } catch { /* ignore */ }
+  }
+
+  private loadJiras() {
+    this.api.listMeetingJiras(this.id).subscribe({ next: (j) => this.jiras.set(j), error: () => {} });
+  }
+
+  addJira(key?: string) {
+    const k = (key ?? this.jiraInput()).trim().toUpperCase();
+    this.jiraErr.set(null);
+    if (!/^[A-Z][A-Z0-9]+-\d+$/.test(k)) { this.jiraErr.set('Enter a valid Jira key like PROJ-123.'); return; }
+    this.jiraBusy.set(true);
+    this.api.linkJira(this.id, k).subscribe({
+      next: () => { this.jiraInput.set(''); this.jiraBusy.set(false); this.loadJiras(); },
+      error: (e) => { this.jiraBusy.set(false); this.jiraErr.set(e?.error?.error ?? 'Could not link the ticket.'); },
+    });
+  }
+
+  unlinkJira(key: string) {
+    this.api.unlinkJira(this.id, key).subscribe({ next: () => this.loadJiras(), error: () => {} });
   }
 
   hl(text: string): string {

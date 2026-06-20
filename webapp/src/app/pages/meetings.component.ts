@@ -27,6 +27,7 @@ interface Row {
   hasSummary: boolean;
   hasTranscript: boolean;
   needsReview: boolean;
+  jiraKeys: string[];
   m: Meeting | null;
 }
 
@@ -47,6 +48,10 @@ const VIEW_KEY = 'mh_meetings_view';
     .mtabs .cnt { font-size:.7rem; font-weight:700; background:var(--panel); color:var(--text-dim); border-radius:999px; padding:.05rem .4rem; min-width:18px; text-align:center; }
     .mtabs button.active .cnt { background:var(--accent-weak); color:var(--accent); }
     .mtabs button.hot:not(.active) .cnt { background:var(--warn-bg); color:var(--warn); }
+
+    .jtags { display:flex; flex-wrap:wrap; gap:.3rem; margin-top:.3rem; }
+    .jtag { font-family:ui-monospace,Menlo,Consolas,monospace; font-size:.68rem; font-weight:700; color:var(--accent);
+      background:var(--accent-weak); padding:.05rem .35rem; border-radius:5px; }
 
     tr.grp-head td { background:var(--bg); font-size:.68rem; font-weight:700; letter-spacing:.08em;
       text-transform:uppercase; color:var(--text-mute); padding:.5rem 1rem; cursor:default; }
@@ -113,7 +118,13 @@ const VIEW_KEY = 'mh_meetings_view';
         <input type="date" [ngModel]="fromD()" (ngModelChange)="fromD.set($event)" title="From date" />
         <input type="date" [ngModel]="toD()" (ngModelChange)="toD.set($event)" title="To date" />
       }
-      @if (q() || source()!=='all' || datePreset()!=='any') {
+      @if (jiraOptions().length) {
+        <select [ngModel]="jiraF()" (ngModelChange)="jiraF.set($event)" title="Jira ticket">
+          <option value="">All tickets</option>
+          @for (k of jiraOptions(); track k) { <option [value]="k">{{ k }}</option> }
+        </select>
+      }
+      @if (q() || source()!=='all' || datePreset()!=='any' || jiraF()) {
         <button class="linkbtn" (click)="clearFilters()">Clear</button>
       }
     </div>
@@ -156,6 +167,11 @@ const VIEW_KEY = 'mh_meetings_view';
                   <td>
                     <div class="cell-title">{{ r.title }}</div>
                     <div class="cell-sub">{{ r.source === 'google' ? 'Google Calendar' : 'Cadence' }}</div>
+                    @if (r.jiraKeys.length) {
+                      <div class="jtags">
+                        @for (k of r.jiraKeys; track k) { <span class="jtag">{{ k }}</span> }
+                      </div>
+                    }
                   </td>
                   <td>
                     {{ r.dateISO ? (r.dateISO | date:'MMM d, y • h:mm a') : '—' }}
@@ -264,6 +280,7 @@ export class MeetingsComponent implements OnInit {
   datePreset = signal<Preset>(this.saved.datePreset ?? 'any');
   fromD = signal(this.saved.fromD ?? '');
   toD = signal(this.saved.toD ?? '');
+  jiraF = signal(this.saved.jiraF ?? '');
   sort = signal<{ key: 'title' | 'date' | 'stage'; dir: 1 | -1 }>(this.saved.sort ?? { key: 'date', dir: -1 });
 
   selected = signal<Set<number>>(new Set());
@@ -282,7 +299,7 @@ export class MeetingsComponent implements OnInit {
   constructor() {
     // Persist the view whenever any control changes.
     effect(() => {
-      const v = { tab: this.tab(), q: this.q(), source: this.source(), datePreset: this.datePreset(), fromD: this.fromD(), toD: this.toD(), sort: this.sort() };
+      const v = { tab: this.tab(), q: this.q(), source: this.source(), datePreset: this.datePreset(), fromD: this.fromD(), toD: this.toD(), jiraF: this.jiraF(), sort: this.sort() };
       try { localStorage.setItem(VIEW_KEY, JSON.stringify(v)); } catch { /* ignore */ }
     });
   }
@@ -307,7 +324,7 @@ export class MeetingsComponent implements OnInit {
         key: 'm' + m.id, id: m.id, title: m.title, dateISO: m.meeting_date, dateMs: ms,
         durationMin: null, stage, participants: GoogleCalendarService.parseEmails(m.attendees),
         source: 'cadence' as const, htmlLink: null, meetLink: m.meet_link ?? null,
-        hasSummary: !!m.summary, hasTranscript, needsReview, m,
+        hasSummary: !!m.summary, hasTranscript, needsReview, jiraKeys: m.jira_keys ?? [], m,
       };
     });
     for (const e of this.gEvents()) {
@@ -319,7 +336,7 @@ export class MeetingsComponent implements OnInit {
         key: 'g' + e.id, id: null, title: e.title, dateISO: e.startISO, dateMs: ms,
         durationMin: dur && dur > 0 ? dur : null, stage, participants: e.attendees ?? [],
         source: 'google', htmlLink: e.htmlLink ?? null, meetLink: e.htmlLink ?? null,
-        hasSummary: false, hasTranscript: false, needsReview: false, m: null,
+        hasSummary: false, hasTranscript: false, needsReview: false, jiraKeys: [], m: null,
       });
     }
     return rows;
@@ -348,14 +365,22 @@ export class MeetingsComponent implements OnInit {
     return { from: null, to: null };
   });
 
+  // Distinct Jira keys present across all rows, for the filter dropdown.
+  jiraOptions = computed<string[]>(() => {
+    const set = new Set<string>();
+    for (const r of this.all()) for (const k of r.jiraKeys) set.add(k);
+    return [...set].sort();
+  });
+
   rows = computed<Row[]>(() => {
-    const tab = this.tab(), query = this.q().trim().toLowerCase(), src = this.source();
+    const tab = this.tab(), query = this.q().trim().toLowerCase(), src = this.source(), jf = this.jiraF();
     const { from, to } = this.range();
     let out = this.all().filter((r) => {
       if (tab === 'review' && !r.needsReview) return false;
       if (tab === 'upcoming' && r.stage !== 'upcoming') return false;
       if (tab === 'summarized' && !r.hasSummary) return false;
       if (src !== 'all' && r.source !== src) return false;
+      if (jf && !r.jiraKeys.includes(jf)) return false;
       if (query && !(r.title.toLowerCase().includes(query) || r.participants.join(' ').toLowerCase().includes(query))) return false;
       if (from !== null && (isNaN(r.dateMs) || r.dateMs < from)) return false;
       if (to !== null && (isNaN(r.dateMs) || r.dateMs >= to)) return false;
@@ -428,7 +453,7 @@ export class MeetingsComponent implements OnInit {
     const s = this.sort();
     this.sort.set({ key, dir: s.key === key ? (s.dir === 1 ? -1 : 1) : (key === 'date' ? -1 : 1) });
   }
-  clearFilters() { this.q.set(''); this.source.set('all'); this.datePreset.set('any'); this.fromD.set(''); this.toD.set(''); }
+  clearFilters() { this.q.set(''); this.source.set('all'); this.datePreset.set('any'); this.fromD.set(''); this.toD.set(''); this.jiraF.set(''); }
 
   open(r: Row) {
     if (r.id) this.router.navigate(['/meetings', r.id]);
@@ -636,7 +661,7 @@ export class MeetingsComponent implements OnInit {
     } catch { return true; }
   }
 
-  private readView(): Partial<{ tab: Tab; q: string; source: Source; datePreset: Preset; fromD: string; toD: string; sort: { key: 'title' | 'date' | 'stage'; dir: 1 | -1 } }> {
+  private readView(): Partial<{ tab: Tab; q: string; source: Source; datePreset: Preset; fromD: string; toD: string; jiraF: string; sort: { key: 'title' | 'date' | 'stage'; dir: 1 | -1 } }> {
     try { return JSON.parse(localStorage.getItem(VIEW_KEY) || '{}'); } catch { return {}; }
   }
 

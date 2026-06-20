@@ -82,6 +82,40 @@ const combinedPrompt = (blocks: string) =>
   "## Consolidated action items\n- owner — task\n" +
   "## Per-meeting highlights\n- **Meeting** — one line each";
 
+// ---- Jira tracking prompts -------------------------------------------------
+// Extract what a single meeting concluded about ONE specific Jira ticket.
+const JIRA_EXTRACT_SYSTEM =
+  "You are a precise program-management analyst. Given a meeting's notes, you " +
+  "extract only the part that concerns one specific Jira ticket. Be faithful to " +
+  "the source — never invent decisions. Respond with only the requested text.";
+
+const jiraExtractPrompt = (key: string, title: string, content: string) =>
+  `Jira ticket: ${key}\nMeeting: ${title}\n\nMeeting notes (summary and/or transcript):\n${content}\n\n` +
+  `In 2–4 sentences, describe specifically what was discussed and concluded about ${key} in this meeting — ` +
+  `decisions, blockers, owners, and next steps if mentioned. ` +
+  `If ${key} was not meaningfully discussed, reply with exactly: Not specifically discussed in this meeting.`;
+
+// Synthesize the whole cross-meeting journey for one Jira ticket.
+const JIRA_JOURNEY_SYSTEM =
+  "You are a program manager tracking a single Jira ticket across many meetings. " +
+  "You are given each meeting's conclusion about the ticket, in chronological order. " +
+  "Synthesize the ticket's journey in Markdown. Respond with only the Markdown.";
+
+const jiraJourneyPrompt = (key: string, blocks: string) =>
+  `Jira ticket: ${key}\n\nChronological per-meeting conclusions:\n\n${blocks}\n\n` +
+  "Write the ticket's journey with exactly these sections:\n" +
+  "## Where it stands\nA 2–3 sentence read on the current status.\n" +
+  "## Journey\n- date — what was discussed/decided (chronological)\n" +
+  "## Key decisions\n- decisions made across the meetings (or \"None\")\n" +
+  "## Open questions & next steps\n- bullets (or \"None\")";
+
+// A Jira key looks like PROJ-123 / AB12-4567. Normalize to upper-case.
+const JIRA_KEY_RE = /^[A-Z][A-Z0-9]+-\d+$/;
+const normalizeJira = (v: unknown): string | null => {
+  const k = String(v ?? "").trim().toUpperCase();
+  return JIRA_KEY_RE.test(k) ? k : null;
+};
+
 /** Single Claude call that returns the joined text of the response. */
 async function summarizeWithClaude(system: string, user: string): Promise<string> {
   if (!anthropic) throw new Error("anthropic_not_configured");
@@ -234,22 +268,62 @@ app.post("/api/auth/google", authLimiter, async (req, res) => {
 // Return the current user from the session token (used on app load).
 app.get("/api/me", requireAuth, (req: AuthedRequest, res) => res.json(req.user));
 
+// ---- User settings (per-user preferences) ----------------------------------
+
+app.get("/api/settings", requireAuth, async (req: AuthedRequest, res) => {
+  try {
+    const r = await pool.query(
+      "SELECT jira_base_url FROM users WHERE email = $1 ORDER BY id DESC LIMIT 1",
+      [req.user!.email]
+    );
+    res.json({ jira_base_url: r.rows[0]?.jira_base_url ?? null });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to fetch settings" });
+  }
+});
+
+app.patch("/api/settings", requireAuth, async (req: AuthedRequest, res) => {
+  const raw = req.body?.jira_base_url;
+  // Normalize: trim, require http(s), ensure a single trailing slash so the
+  // client can just append the key. Empty string clears it.
+  let url: string | null = null;
+  if (typeof raw === "string" && raw.trim()) {
+    const t = raw.trim();
+    if (!/^https?:\/\//i.test(t))
+      return res.status(400).json({ error: "Jira base URL must start with http:// or https://" });
+    url = t.replace(/\/+$/, "") + "/";
+  }
+  try {
+    await pool.query("UPDATE users SET jira_base_url = $1 WHERE email = $2", [url, req.user!.email]);
+    res.json({ jira_base_url: url });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to save settings" });
+  }
+});
+
 // ---- Meetings --------------------------------------------------------------
 
 app.get("/api/meetings", requireAuth, async (req: AuthedRequest, res) => {
   const { status, q } = req.query as { status?: string; q?: string };
   const params: any[] = [req.user!.email];
+  // array_agg of linked Jira keys so the list/board can show & filter by ticket.
   let sql =
-    "SELECT * FROM meetings WHERE user_email = $1";
+    `SELECT m.*,
+       COALESCE(ARRAY_AGG(mj.jira_key ORDER BY mj.jira_key) FILTER (WHERE mj.jira_key IS NOT NULL), '{}') AS jira_keys
+     FROM meetings m
+     LEFT JOIN meeting_jiras mj ON mj.meeting_id = m.id AND mj.user_email = m.user_email
+     WHERE m.user_email = $1`;
   if (status && status !== "all") {
     params.push(status);
-    sql += ` AND status = $${params.length}`;
+    sql += ` AND m.status = $${params.length}`;
   }
   if (q) {
     params.push(`%${q}%`);
-    sql += ` AND (title ILIKE $${params.length} OR attendees ILIKE $${params.length} OR notes ILIKE $${params.length})`;
+    sql += ` AND (m.title ILIKE $${params.length} OR m.attendees ILIKE $${params.length} OR m.notes ILIKE $${params.length})`;
   }
-  sql += " ORDER BY meeting_date DESC NULLS LAST, created_at DESC";
+  sql += " GROUP BY m.id ORDER BY m.meeting_date DESC NULLS LAST, m.created_at DESC";
   try {
     res.json((await pool.query(sql, params)).rows);
   } catch (err) {
@@ -482,6 +556,298 @@ app.post("/api/meetings/combined-summary", summaryLimiter, requireAuth, async (r
   }
 });
 
+// ---- Jira tracking ---------------------------------------------------------
+// Tickets are entered manually (one meeting ↔ many tickets, one ticket ↔ many
+// meetings). For each link we cache an AI-extracted conclusion: what THIS
+// meeting decided about THAT ticket. Per ticket we can synthesize the whole
+// cross-meeting journey.
+
+// Build the "what did this meeting conclude about this ticket" text. Returns
+// null when there's nothing to read or no summary provider is configured.
+async function extractJiraConclusion(
+  email: string,
+  meetingId: number,
+  jiraKey: string
+): Promise<string | null> {
+  if (!summariesEnabled) return null;
+  const r = await pool.query(
+    "SELECT title, summary, transcript FROM meetings WHERE id = $1 AND user_email = $2",
+    [meetingId, email]
+  );
+  if (!r.rowCount) return null;
+  const { title, summary, transcript } = r.rows[0];
+  const content =
+    (summary ? `Summary:\n${summary}\n\n` : "") +
+    (transcript ? `Transcript:\n${String(transcript).slice(0, 60_000)}` : "");
+  if (!content.trim()) return null;
+  try {
+    const out = await runSummary(JIRA_EXTRACT_SYSTEM, jiraExtractPrompt(jiraKey, title ?? "Meeting", content));
+    return out?.trim() || null;
+  } catch (err) {
+    console.error("Jira conclusion extraction failed:", err);
+    return null;
+  }
+}
+
+// List of distinct tickets with rollups (used by the Jira board).
+app.get("/api/jiras", requireAuth, async (req: AuthedRequest, res) => {
+  try {
+    const r = await pool.query(
+      `SELECT mj.jira_key,
+         COUNT(DISTINCT mj.meeting_id)::int AS meeting_count,
+         COUNT(mj.conclusion)::int          AS with_conclusion,
+         MIN(m.meeting_date)                AS first_discussed,
+         MAX(m.meeting_date)                AS last_discussed,
+         j.title,
+         (j.journey_summary IS NOT NULL)    AS has_journey,
+         j.journey_built_at
+       FROM meeting_jiras mj
+       JOIN meetings m ON m.id = mj.meeting_id AND m.user_email = mj.user_email
+       LEFT JOIN jiras j ON j.user_email = mj.user_email AND j.jira_key = mj.jira_key
+       WHERE mj.user_email = $1
+       GROUP BY mj.jira_key, j.title, j.journey_summary, j.journey_built_at
+       ORDER BY MAX(m.meeting_date) DESC NULLS LAST, mj.jira_key`,
+      [req.user!.email]
+    );
+    res.json(r.rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to fetch Jira tickets" });
+  }
+});
+
+// Mind-map data: every ticket, every meeting that has ≥1 ticket, and the links.
+app.get("/api/jira-map", requireAuth, async (req: AuthedRequest, res) => {
+  try {
+    const email = req.user!.email;
+    const [jiras, meetings, edges] = await Promise.all([
+      pool.query(
+        `SELECT mj.jira_key, COUNT(DISTINCT mj.meeting_id)::int AS meeting_count, j.title
+         FROM meeting_jiras mj
+         LEFT JOIN jiras j ON j.user_email = mj.user_email AND j.jira_key = mj.jira_key
+         WHERE mj.user_email = $1 GROUP BY mj.jira_key, j.title`,
+        [email]
+      ),
+      pool.query(
+        `SELECT DISTINCT m.id, m.title, m.meeting_date
+         FROM meetings m JOIN meeting_jiras mj ON mj.meeting_id = m.id AND mj.user_email = m.user_email
+         WHERE m.user_email = $1`,
+        [email]
+      ),
+      pool.query(
+        "SELECT meeting_id, jira_key FROM meeting_jiras WHERE user_email = $1",
+        [email]
+      ),
+    ]);
+    res.json({ jiras: jiras.rows, meetings: meetings.rows, edges: edges.rows });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to build Jira map" });
+  }
+});
+
+// One ticket: metadata + chronological meeting journey with per-meeting conclusions.
+app.get("/api/jiras/:key", requireAuth, async (req: AuthedRequest, res) => {
+  const key = normalizeJira(req.params.key);
+  if (!key) return res.status(400).json({ error: "Invalid Jira key" });
+  try {
+    const email = req.user!.email;
+    const [meta, meetings, settings] = await Promise.all([
+      pool.query("SELECT title, journey_summary, journey_built_at FROM jiras WHERE user_email = $1 AND jira_key = $2", [email, key]),
+      pool.query(
+        `SELECT m.id, m.title, m.meeting_date, m.meet_link, m.status,
+                (m.summary IS NOT NULL) AS has_summary, mj.conclusion
+         FROM meeting_jiras mj
+         JOIN meetings m ON m.id = mj.meeting_id AND m.user_email = mj.user_email
+         WHERE mj.user_email = $1 AND mj.jira_key = $2
+         ORDER BY m.meeting_date ASC NULLS LAST, m.id ASC`,
+        [email, key]
+      ),
+      pool.query("SELECT jira_base_url FROM users WHERE email = $1 ORDER BY id DESC LIMIT 1", [email]),
+    ]);
+    if (!meetings.rowCount) return res.status(404).json({ error: "No meetings reference this ticket." });
+    res.json({
+      jira_key: key,
+      title: meta.rows[0]?.title ?? null,
+      journey_summary: meta.rows[0]?.journey_summary ?? null,
+      journey_built_at: meta.rows[0]?.journey_built_at ?? null,
+      base_url: settings.rows[0]?.jira_base_url ?? null,
+      meetings: meetings.rows,
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to fetch ticket" });
+  }
+});
+
+// Set a human title for a ticket (upsert).
+app.patch("/api/jiras/:key", requireAuth, async (req: AuthedRequest, res) => {
+  const key = normalizeJira(req.params.key);
+  if (!key) return res.status(400).json({ error: "Invalid Jira key" });
+  const title = nullIfEmpty(req.body?.title);
+  try {
+    const r = await pool.query(
+      `INSERT INTO jiras (user_email, jira_key, title) VALUES ($1, $2, $3)
+       ON CONFLICT (user_email, jira_key) DO UPDATE SET title = EXCLUDED.title
+       RETURNING jira_key, title`,
+      [req.user!.email, key, title]
+    );
+    res.json(r.rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to update ticket" });
+  }
+});
+
+// Synthesize the whole journey for a ticket from its per-meeting conclusions.
+app.post("/api/jiras/:key/synthesize", summaryLimiter, requireAuth, async (req: AuthedRequest, res) => {
+  if (!summariesEnabled)
+    return res.status(503).json({ error: "Summaries aren't configured on the server (set GEMINI_API_KEY or ANTHROPIC_API_KEY)." });
+  const key = normalizeJira(req.params.key);
+  if (!key) return res.status(400).json({ error: "Invalid Jira key" });
+  try {
+    const email = req.user!.email;
+    const rows = (await pool.query(
+      `SELECT m.title, m.meeting_date, mj.conclusion
+       FROM meeting_jiras mj
+       JOIN meetings m ON m.id = mj.meeting_id AND m.user_email = mj.user_email
+       WHERE mj.user_email = $1 AND mj.jira_key = $2 AND mj.conclusion IS NOT NULL
+       ORDER BY m.meeting_date ASC NULLS LAST, m.id ASC`,
+      [email, key]
+    )).rows;
+    if (!rows.length)
+      return res.status(400).json({ error: "No per-meeting conclusions yet. Tag meetings (and let conclusions generate) first." });
+
+    const blocks = rows.map((r) => {
+      const d = r.meeting_date ? new Date(r.meeting_date).toISOString().slice(0, 10) : "undated";
+      return `- ${d} — ${r.title}: ${r.conclusion}`;
+    }).join("\n");
+
+    const summary = await runSummary(JIRA_JOURNEY_SYSTEM, jiraJourneyPrompt(key, blocks));
+    if (!summary) return res.status(502).json({ error: "Empty summary from the model." });
+
+    const r = await pool.query(
+      `INSERT INTO jiras (user_email, jira_key, journey_summary, journey_built_at)
+       VALUES ($1, $2, $3, now())
+       ON CONFLICT (user_email, jira_key)
+       DO UPDATE SET journey_summary = EXCLUDED.journey_summary, journey_built_at = now()
+       RETURNING journey_summary, journey_built_at`,
+      [email, key, summary]
+    );
+    res.json(r.rows[0]);
+  } catch (err) {
+    console.error("Jira journey synthesis failed:", err);
+    res.status(502).json({ error: "Could not build the journey summary." });
+  }
+});
+
+// Tickets linked to one meeting (for the meeting detail page).
+app.get("/api/meetings/:id/jiras", requireAuth, async (req: AuthedRequest, res) => {
+  try {
+    const r = await pool.query(
+      "SELECT jira_key, conclusion FROM meeting_jiras WHERE meeting_id = $1 AND user_email = $2 ORDER BY jira_key",
+      [Number(req.params.id), req.user!.email]
+    );
+    res.json(r.rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to fetch ticket links" });
+  }
+});
+
+// Attach a ticket to a meeting; best-effort auto-extract the conclusion.
+app.post("/api/meetings/:id/jiras", requireAuth, async (req: AuthedRequest, res) => {
+  const id = Number(req.params.id);
+  const key = normalizeJira(req.body?.jira_key);
+  if (!key) return res.status(400).json({ error: "Provide a valid Jira key like PROJ-123." });
+  try {
+    const email = req.user!.email;
+    const owned = await pool.query("SELECT id FROM meetings WHERE id = $1 AND user_email = $2", [id, email]);
+    if (!owned.rowCount) return res.status(404).json({ error: "Meeting not found" });
+
+    const conclusion = await extractJiraConclusion(email, id, key);
+    const r = await pool.query(
+      `INSERT INTO meeting_jiras (meeting_id, user_email, jira_key, conclusion)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (meeting_id, jira_key, user_email)
+       DO UPDATE SET conclusion = COALESCE(EXCLUDED.conclusion, meeting_jiras.conclusion)
+       RETURNING jira_key, conclusion`,
+      [id, email, key, conclusion]
+    );
+    // Make sure the ticket exists in the jiras table so it shows on the board.
+    await pool.query(
+      "INSERT INTO jiras (user_email, jira_key) VALUES ($1, $2) ON CONFLICT (user_email, jira_key) DO NOTHING",
+      [email, key]
+    );
+    res.status(201).json(r.rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to link ticket" });
+  }
+});
+
+// Manually edit a meeting's conclusion about a ticket.
+app.patch("/api/meetings/:id/jiras/:key", requireAuth, async (req: AuthedRequest, res) => {
+  const id = Number(req.params.id);
+  const key = normalizeJira(req.params.key);
+  if (!key) return res.status(400).json({ error: "Invalid Jira key" });
+  try {
+    const r = await pool.query(
+      `UPDATE meeting_jiras SET conclusion = $1
+       WHERE meeting_id = $2 AND jira_key = $3 AND user_email = $4
+       RETURNING jira_key, conclusion`,
+      [nullIfEmpty(req.body?.conclusion), id, key, req.user!.email]
+    );
+    if (!r.rowCount) return res.status(404).json({ error: "Link not found" });
+    res.json(r.rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to update conclusion" });
+  }
+});
+
+// Re-run AI extraction for one meeting+ticket conclusion.
+app.post("/api/meetings/:id/jiras/:key/extract", summaryLimiter, requireAuth, async (req: AuthedRequest, res) => {
+  if (!summariesEnabled)
+    return res.status(503).json({ error: "Summaries aren't configured on the server (set GEMINI_API_KEY or ANTHROPIC_API_KEY)." });
+  const id = Number(req.params.id);
+  const key = normalizeJira(req.params.key);
+  if (!key) return res.status(400).json({ error: "Invalid Jira key" });
+  try {
+    const email = req.user!.email;
+    const conclusion = await extractJiraConclusion(email, id, key);
+    if (!conclusion) return res.status(400).json({ error: "This meeting has no summary or transcript to read yet." });
+    const r = await pool.query(
+      `UPDATE meeting_jiras SET conclusion = $1
+       WHERE meeting_id = $2 AND jira_key = $3 AND user_email = $4
+       RETURNING jira_key, conclusion`,
+      [conclusion, id, key, email]
+    );
+    if (!r.rowCount) return res.status(404).json({ error: "Link not found" });
+    res.json(r.rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(502).json({ error: "Could not extract the conclusion." });
+  }
+});
+
+// Detach a ticket from a meeting.
+app.delete("/api/meetings/:id/jiras/:key", requireAuth, async (req: AuthedRequest, res) => {
+  const key = normalizeJira(req.params.key);
+  if (!key) return res.status(400).json({ error: "Invalid Jira key" });
+  try {
+    const r = await pool.query(
+      "DELETE FROM meeting_jiras WHERE meeting_id = $1 AND jira_key = $2 AND user_email = $3",
+      [Number(req.params.id), key, req.user!.email]
+    );
+    if (!r.rowCount) return res.status(404).json({ error: "Link not found" });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to unlink ticket" });
+  }
+});
+
 // ---- Tasks (action items) --------------------------------------------------
 
 app.get("/api/tasks", requireAuth, async (req: AuthedRequest, res) => {
@@ -671,6 +1037,39 @@ async function ensureSchema() {
       UNIQUE (meeting_id, conference_record)
     )
   `);
+
+  // Per-user Jira deep-link base, e.g. https://acme.atlassian.net/browse/
+  await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS jira_base_url TEXT");
+
+  // Optional per-ticket metadata + cached cross-meeting journey synthesis.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS jiras (
+      id SERIAL PRIMARY KEY,
+      user_email TEXT NOT NULL,
+      jira_key TEXT NOT NULL,
+      title TEXT,
+      journey_summary TEXT,
+      journey_built_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ DEFAULT now(),
+      UNIQUE (user_email, jira_key)
+    )
+  `);
+
+  // Many-to-many link between meetings and Jira tickets, with the AI-extracted
+  // (or hand-edited) conclusion this meeting reached about that ticket.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS meeting_jiras (
+      id SERIAL PRIMARY KEY,
+      meeting_id INTEGER NOT NULL,
+      user_email TEXT NOT NULL,
+      jira_key TEXT NOT NULL,
+      conclusion TEXT,
+      created_at TIMESTAMPTZ DEFAULT now(),
+      UNIQUE (meeting_id, jira_key, user_email)
+    )
+  `);
+  await pool.query("CREATE INDEX IF NOT EXISTS idx_meeting_jiras_key ON meeting_jiras (user_email, jira_key)");
+  await pool.query("CREATE INDEX IF NOT EXISTS idx_meeting_jiras_meeting ON meeting_jiras (meeting_id)");
 }
 
 const port = Number(process.env.PORT) || 3000;

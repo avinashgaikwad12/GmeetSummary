@@ -20,6 +20,7 @@ import { AuthService } from './auth.service';
           <a routerLink="/" routerLinkActive="active" [routerLinkActiveOptions]="{exact:true}" (click)="closeNav()"><span class="ic">▣</span> Dashboard</a>
           <a routerLink="/meetings" routerLinkActive="active" (click)="closeNav()"><span class="ic">◴</span> Meetings</a>
           <a routerLink="/tasks" routerLinkActive="active" (click)="closeNav()"><span class="ic">✔</span> Action items</a>
+          <a routerLink="/jira" routerLinkActive="active" (click)="closeNav()"><span class="ic">⌗</span> Jira tracker</a>
           <a routerLink="/search" routerLinkActive="active" (click)="closeNav()"><span class="ic">⌕</span> Search</a>
           <div class="sec">Workspace</div>
           <a routerLink="/settings" routerLinkActive="active" (click)="closeNav()"><span class="ic">⚙</span> Settings</a>

@@ -1,10 +1,13 @@
-import { Component, inject, signal } from '@angular/core';
+import { Component, inject, signal, OnInit } from '@angular/core';
 import { Router } from '@angular/router';
+import { FormsModule } from '@angular/forms';
 import { AuthService } from '../auth.service';
 import { GoogleCalendarService } from '../google-calendar.service';
+import { ApiService } from '../api.service';
 
 @Component({
   selector: 'app-settings',
+  imports: [FormsModule],
   template: `
     <div class="page-head">
       <div><div class="eyebrow">Settings</div><h1 class="takeaway">Your workspace &amp; integrations</h1></div>
@@ -43,6 +46,24 @@ import { GoogleCalendarService } from '../google-calendar.service';
           </div>
           @if (gMsg()) { <p class="note" style="margin-top:.7rem">{{ gMsg() }}</p> }
         </section>
+
+        <!-- Jira -->
+        <section class="panel">
+          <div class="panel-head"><h2>Jira</h2></div>
+          <p class="muted" style="font-size:.88rem; margin-bottom:.8rem">
+            Set your Jira base URL and every ticket key (e.g. PROJ-123) becomes a clickable deep link. Leave blank to keep keys as plain text.
+          </p>
+          <label class="field">
+            <span>Jira base URL</span>
+            <input [ngModel]="jiraUrl()" (ngModelChange)="jiraUrl.set($event)"
+                   placeholder="https://your-company.atlassian.net/browse/" />
+          </label>
+          <div class="row">
+            <span class="spacer"></span>
+            <button class="btn btn-sm btn-primary" (click)="saveJira()" [disabled]="jiraBusy()">{{ jiraBusy() ? '…' : 'Save' }}</button>
+          </div>
+          @if (jiraMsg()) { <p class="note" style="margin-top:.7rem">{{ jiraMsg() }}</p> }
+        </section>
       </div>
 
       <div style="display:flex; flex-direction:column; gap:1.2rem">
@@ -67,15 +88,32 @@ import { GoogleCalendarService } from '../google-calendar.service';
     </div>
   `,
 })
-export class SettingsComponent {
+export class SettingsComponent implements OnInit {
   auth = inject(AuthService);
   private cal = inject(GoogleCalendarService);
+  private api = inject(ApiService);
   private router = inject(Router);
   user = this.auth.user;
 
   connected = signal(this.cal.isConnected());
   busy = signal(false);
   gMsg = signal<string | null>(null);
+
+  jiraUrl = signal('');
+  jiraBusy = signal(false);
+  jiraMsg = signal<string | null>(null);
+
+  ngOnInit() {
+    this.api.getSettings().subscribe({ next: (s) => this.jiraUrl.set(s.jira_base_url ?? '') });
+  }
+
+  saveJira() {
+    this.jiraBusy.set(true); this.jiraMsg.set(null);
+    this.api.saveSettings({ jira_base_url: this.jiraUrl().trim() }).subscribe({
+      next: (s) => { this.jiraUrl.set(s.jira_base_url ?? ''); this.jiraBusy.set(false); this.jiraMsg.set('Saved.'); },
+      error: (e) => { this.jiraBusy.set(false); this.jiraMsg.set(e?.error?.error ?? 'Could not save.'); },
+    });
+  }
 
   wasConnected() { return this.cal.wasConnected(); }
 
